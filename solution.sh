@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(pwd)"
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 
 BLEATER_NS="bleater"
+LOG_NS="logging"
 
 echo "Diagnosing hidden characters in REDIS_URL..."
 kubectl get configmap bleat-service-config -n "${BLEATER_NS}" \
@@ -12,8 +13,8 @@ kubectl get configmap bleat-service-config -n "${BLEATER_NS}" \
 echo
 
 echo "Fixing manifest..."
-mkdir -p "${SCRIPT_DIR}/k8s"
-cat <<'EOF' > "${SCRIPT_DIR}/k8s/bleat-service-configmap.yaml"
+mkdir -p k8s
+cat <<'EOF' > k8s/bleat-service-configmap.yaml
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -24,83 +25,47 @@ data:
 EOF
 
 echo "Creating validation script..."
-mkdir -p "${SCRIPT_DIR}/scripts"
-cat <<'EOF' > "${SCRIPT_DIR}/scripts/validate_configmap.py"
+mkdir -p scripts
+cat <<'EOF' > scripts/validate_configmap.py
 #!/usr/bin/env python3
-import pathlib
-import re
-import sys
+import pathlib, re, sys
+CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+ESC = re.compile(r"(\\r|\\x0d|\\u000d)", re.I)
 
-CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-ESCAPED_CR = re.compile(r"(\\r|\\x0d|\\u000d)", re.IGNORECASE)
-
-def validate(path: pathlib.Path) -> int:
-    text = path.read_text(encoding="utf-8", errors="strict")
-    if "\r" in text:
-        print(f"ERROR: raw carriage return found in {path}")
-        return 1
-    if CONTROL_CHARS.search(text):
-        print(f"ERROR: non-printable character found in {path}")
-        return 1
-    if ESCAPED_CR.search(text):
-        print(f"ERROR: escaped carriage return sequence found in {path}")
-        return 1
-    print(f"OK: {path}")
+def check(p):
+    t=p.read_text()
+    if "\r" in t: return 1
+    if CONTROL.search(t): return 1
+    if ESC.search(t): return 1
     return 0
 
-def main(argv) -> int:
-    if len(argv) < 2:
-        print("Usage: validate_configmap.py <file> [<file> ...]")
-        return 2
-    rc = 0
-    for arg in argv[1:]:
-        path = pathlib.Path(arg)
-        if not path.exists():
-            print(f"ERROR: missing file {path}")
-            rc = 1
-            continue
-        rc = max(rc, validate(path))
-    return rc
-
-if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+rc=0
+for f in sys.argv[1:]:
+    p=pathlib.Path(f)
+    if not p.exists(): rc=1
+    else: rc=max(rc,check(p))
+sys.exit(rc)
 EOF
-chmod +x "${SCRIPT_DIR}/scripts/validate_configmap.py"
+chmod +x scripts/validate_configmap.py
 
 echo "Updating CI workflow..."
-mkdir -p "${SCRIPT_DIR}/.gitea/workflows"
-cat <<'EOF' > "${SCRIPT_DIR}/.gitea/workflows/bleat-ci.yaml"
+mkdir -p .gitea/workflows
+cat <<'EOF' > .gitea/workflows/bleat-ci.yaml
 name: bleat-ci
-
-on:
-  push:
-  pull_request:
-
+on: [push, pull_request]
 jobs:
-  configmap-lint:
+  validate:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Validate ConfigMap encoding
-        run: |
-          python3 scripts/validate_configmap.py k8s/bleat-service-configmap.yaml
-
-  unit-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Run unit tests
-        run: echo "tests passed"
+      - uses: actions/checkout@v4
+      - run: python3 scripts/validate_configmap.py k8s/bleat-service-configmap.yaml
 EOF
 
 echo "Validating manifest..."
-python3 "${SCRIPT_DIR}/scripts/validate_configmap.py" \
-  "${SCRIPT_DIR}/k8s/bleat-service-configmap.yaml"
+python3 scripts/validate_configmap.py k8s/bleat-service-configmap.yaml
 
 echo "Applying fixed ConfigMap..."
-kubectl apply -f "${SCRIPT_DIR}/k8s/bleat-service-configmap.yaml"
+kubectl apply -f k8s/bleat-service-configmap.yaml
 
 echo "Triggering rolling restart..."
 kubectl rollout restart deployment/bleat-service -n "${BLEATER_NS}"
@@ -110,13 +75,38 @@ echo "Checking pod status..."
 kubectl get pods -n "${BLEATER_NS}" -l app=bleat-service
 echo
 
-echo "Verifying Redis connectivity via pod environment..."
-POD="$(kubectl get pods -n ${BLEATER_NS} -l app=bleat-service -o jsonpath='{.items[0].metadata.name}')"
+echo "Selecting a RUNNING pod..."
+POD="$(kubectl get pods -n ${BLEATER_NS} -l app=bleat-service \
+  --field-selector=status.phase=Running \
+  -o jsonpath='{.items[0].metadata.name}')"
+
+if [ -z "${POD}" ]; then
+  echo "No Running bleat-service pod found"
+  exit 1
+fi
+
+echo "Verifying REDIS_URL env..."
 kubectl exec -n "${BLEATER_NS}" "$POD" -- printenv REDIS_URL
 echo
 
-echo "Checking Loki readiness (RBAC-safe)..."
-curl -sf http://loki-gateway.logging.svc.cluster.local:3100/ready >/dev/null \
-  && echo "Loki reachable"
+echo "Waiting for Loki success logs..."
+LOKI_POD="$(kubectl get pods -n ${LOG_NS} -l app=loki-gateway \
+  -o jsonpath='{.items[0].metadata.name}')"
 
+SUCCESS=0
+for i in {1..30}; do
+  if kubectl exec -n "${LOG_NS}" "$LOKI_POD" -- \
+    grep -q "redis connection established" /data/logs.jsonl 2>/dev/null; then
+    SUCCESS=1
+    break
+  fi
+  sleep 2
+done
+
+if [ "$SUCCESS" -ne 1 ]; then
+  echo "Loki success log not found"
+  exit 1
+fi
+
+echo "Loki shows successful Redis connection."
 echo "Remediation complete."
