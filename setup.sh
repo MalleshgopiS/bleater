@@ -365,7 +365,16 @@ kubectl rollout status deployment/loki-gateway -n "${LOG_NS}" --timeout=180s || 
 echo "Waiting for bleat-service pods to appear in broken state..."
 sleep 10
 kubectl get deployment bleat-service -n "${BLEATER_NS}" -o jsonpath='{.metadata.uid}' > "${UID_FILE}"
-kubectl get pods -n "${BLEATER_NS}" -l app=bleat-service -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | sort > "${PODS_FILE}"
+
+# Use Python JSON parser to ensure we only get valid bleat-service pods and ignore terminating ones
+kubectl get pods -n "${BLEATER_NS}" -l app=bleat-service -o json | python3 -c '
+import sys, json
+data = json.load(sys.stdin)
+for p in data.get("items", []):
+    if not p["metadata"].get("deletionTimestamp") and p["metadata"]["name"].startswith("bleat-service-"):
+        print(p["metadata"]["name"])
+' | sort > "${PODS_FILE}"
+
 chmod 400 "${UID_FILE}" "${PODS_FILE}"
 
 echo "Setup complete."

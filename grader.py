@@ -56,13 +56,20 @@ def wait_for_ready(timeout: int = 120) -> bool:
     return False
 
 def get_running_pods():
-    code, out, _ = run(
-        f"kubectl get pods -n {BLEATER_NS} -l app={DEPLOY} "
-        "-o jsonpath='{range .items[*]}{.metadata.name}{\"\\n\"}{end}'"
-    )
+    code, out, _ = run(f"kubectl get pods -n {BLEATER_NS} -l app={DEPLOY} -o json")
     if code != 0:
         return []
-    return [line for line in out.splitlines() if line.strip()]
+    try:
+        data = json.loads(out)
+        return [
+            p["metadata"]["name"]
+            for p in data.get("items", [])
+            # Ignore pods that are terminating and filter out the conflicting bleater-bleat-service
+            if not p["metadata"].get("deletionTimestamp")
+            and p["metadata"]["name"].startswith(f"{DEPLOY}-")
+        ]
+    except Exception:
+        return []
 
 def get_loki_entries():
     code, pod_name, err = run(
