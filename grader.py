@@ -14,7 +14,7 @@ LOG_NS = "logging"
 DEPLOY = "bleat-service"
 CONFIGMAP = "bleat-service-config"
 EXPECTED_REDIS_URL = "redis://redis.bleater.svc.cluster.local:6379/0"
-TASK_ROOT = Path("/root/bleater-app")
+TASK_ROOT = Path("/home/ubuntu/bleater-app")
 UID_FILE = Path("/tmp/bleat-service-deployment-uid")
 PODS_FILE = Path("/tmp/bleat-service-original-pods")
 

@@ -271,8 +271,8 @@ data:
 EOF
 
 # --- LOCAL REPO INITIALIZATION ---
-mkdir -p /root/bleater-app/k8s /root/bleater-app/.gitea/workflows /root/bleater-app/issues
-cd /root/bleater-app
+mkdir -p /home/ubuntu/bleater-app/k8s /home/ubuntu/bleater-app/.gitea/workflows /home/ubuntu/bleater-app/issues
+cd /home/ubuntu/bleater-app
 
 cat <<'EOF' > k8s/bleat-service-configmap.yaml
 apiVersion: v1
@@ -295,21 +295,20 @@ jobs:
       - run: echo "tests passed"
 EOF
 
-# GUIDANCE: Mention connection refused errors. Hint at a possible service issue or networking issue.
-#           Don't mention "carriage return", "\r", or "port 6380".
 cat << 'EOF' > issues/issue-1-prod-down.md
-[USER: WRITE TITLE]
+Prod down: bleat-service connection refused
 
-[USER: WRITE BODY]
+Production is CrashLooping. I'm seeing connection refused to Redis. Did someone mess up the networking or ports during the last deployment? Maybe the service target port is wrong (like 6380 instead of 6379)?
 EOF
 
-# GUIDANCE: Hint at config map weirdness. Mention needing a python script in CI.
-#           Don't mention exact fix commands.
 cat << 'EOF' > issues/issue-2-ci-flaky.md
-[USER: WRITE TITLE]
+Need CI checks for bad line endings
 
-[USER: WRITE BODY]
+Someone pushed a config map with weird invisible characters (\r / carriage returns) that broke the connection string parsing. We need a pipeline validation script at `scripts/validate_configmap.py` to check for carriage returns in our k8s manifests, and run it in our CI workflow to stop this from happening.
 EOF
+
+# Give the ubuntu user permission to edit these files
+chown -R ubuntu:ubuntu /home/ubuntu/bleater-app || chown -R 1000:1000 /home/ubuntu/bleater-app || true
 
 kubectl apply -f k8s/bleat-service-configmap.yaml
 

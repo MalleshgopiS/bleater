@@ -14,7 +14,7 @@ prompt: |
   [Context]
   You are responding to a production incident. The `bleat-service` application in the `bleater` namespace is currently failing to start. 
   
-  Engineers have reported symptoms in the local incident tracker located at `/root/bleater-app/issues/`.
+  Engineers have reported symptoms in the local incident tracker located at `/home/ubuntu/bleater-app/issues/`.
 
   [Task]
   Investigate the cascading failures preventing `bleat-service` from connecting to its datastore. 

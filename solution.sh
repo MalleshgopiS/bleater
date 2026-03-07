@@ -3,7 +3,7 @@ set -euo pipefail
 
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 BLEATER_NS="bleater"
-cd /root/bleater-app
+cd /home/ubuntu/bleater-app
 
 echo "1. Fixing the Redis Service Port Routing..."
 kubectl patch service redis -n "${BLEATER_NS}" -p '{"spec":{"ports":[{"port": 6379, "targetPort": 6379, "name": "redis"}]}}'
