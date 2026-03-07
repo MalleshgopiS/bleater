@@ -14,10 +14,9 @@ LOG_NS = "logging"
 DEPLOY = "bleat-service"
 CONFIGMAP = "bleat-service-config"
 EXPECTED_REDIS_URL = "redis://redis.bleater.svc.cluster.local:6379/0"
-TASK_ROOT = Path(__file__).resolve().parent
+TASK_ROOT = Path("/root/bleater-app")
 UID_FILE = Path("/tmp/bleat-service-deployment-uid")
 PODS_FILE = Path("/tmp/bleat-service-original-pods")
-
 
 def run(cmd: str, timeout: int = 30):
     try:
@@ -33,7 +32,6 @@ def run(cmd: str, timeout: int = 30):
         return -1, "", "command timed out"
     except Exception as exc:
         return -1, "", str(exc)
-
 
 def wait_for_ready(timeout: int = 120) -> bool:
     deadline = time.time() + timeout
@@ -57,7 +55,6 @@ def wait_for_ready(timeout: int = 120) -> bool:
         time.sleep(3)
     return False
 
-
 def get_running_pods():
     code, out, _ = run(
         f"kubectl get pods -n {BLEATER_NS} -l app={DEPLOY} "
@@ -66,7 +63,6 @@ def get_running_pods():
     if code != 0:
         return []
     return [line for line in out.splitlines() if line.strip()]
-
 
 def get_loki_entries():
     code, pod_name, err = run(
@@ -94,7 +90,6 @@ def get_loki_entries():
             continue
     return True, "Loki log store readable", entries
 
-
 def check_live_configmap():
     code, out, err = run(
         f"kubectl get configmap {CONFIGMAP} -n {BLEATER_NS} -o json"
@@ -113,7 +108,6 @@ def check_live_configmap():
     if ok:
         return True, "Live ConfigMap REDIS_URL is clean and canonical"
     return False, f"Live ConfigMap REDIS_URL is still invalid: {redis_url!r}"
-
 
 def check_repo_manifest():
     manifest = TASK_ROOT / "k8s" / "bleat-service-configmap.yaml"
@@ -134,7 +128,6 @@ def check_repo_manifest():
         return True, "Checked-out manifest is clean"
     return False, "Checked-out manifest still contains encoded or hidden control characters"
 
-
 def check_uid_preserved():
     if not UID_FILE.exists():
         return False, "Missing stored original deployment UID"
@@ -150,7 +143,6 @@ def check_uid_preserved():
     if ok:
         return True, "Deployment object was preserved"
     return False, "Deployment UID changed; expected a rolling restart instead of recreation"
-
 
 def check_rollout_restart():
     if not PODS_FILE.exists():
@@ -168,13 +160,11 @@ def check_rollout_restart():
         return True, "Pods were replaced during a rolling restart"
     return False, f"Rolling restart not detected; old={sorted(original_pods)}, current={sorted(current_pods)}"
 
-
 def check_deployment_ready():
     ok = wait_for_ready(timeout=150)
     if ok:
         return True, "bleat-service deployment is fully Ready"
     return False, "bleat-service deployment never reached 2/2 Ready replicas"
-
 
 def check_pod_env():
     pods = get_running_pods()
@@ -193,7 +183,6 @@ def check_pod_env():
         return True, "Running bleat-service pod uses the cleaned REDIS_URL"
     return False, f"Running pod still has stale REDIS_URL: {out!r}"
 
-
 def check_loki_success():
     ok, msg, entries = get_loki_entries()
     if not ok:
@@ -207,7 +196,6 @@ def check_loki_success():
     if success_entries:
         return True, "Loki contains a successful Redis connection log"
     return False, "Loki does not show a successful Redis connection log"
-
 
 def check_loki_no_new_errors():
     ok, msg, entries = get_loki_entries()
@@ -238,7 +226,6 @@ def check_loki_no_new_errors():
     if not newer_errors:
         return True, "No newer bleat-service error logs appear after Redis recovery"
     return False, "Loki still contains bleat-service error logs after the latest success event"
-
 
 def check_validation_script():
     script = TASK_ROOT / "scripts" / "validate_configmap.py"
@@ -274,7 +261,6 @@ def check_validation_script():
         return True, "Validation script accepts clean manifests and rejects carriage-return corruption"
     return False, "Validation script behavior is incorrect"
 
-
 def check_workflow_hook():
     workflow = TASK_ROOT / ".gitea" / "workflows" / "bleat-ci.yaml"
     if not workflow.exists():
@@ -285,7 +271,6 @@ def check_workflow_hook():
     if ok:
         return True, "CI workflow invokes the ConfigMap validation step"
     return False, "CI workflow does not call the ConfigMap validation step"
-
 
 def grade(transcript: str) -> GradingResult:
     checks = {

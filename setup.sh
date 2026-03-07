@@ -16,12 +16,9 @@ until kubectl get nodes >/dev/null 2>&1; do
         echo "Error: k3s is not ready after ${MAX_WAIT} seconds"
         exit 1
     fi
-    echo "Waiting for k3s... (${ELAPSED}s elapsed)"
     sleep 2
     ELAPSED=$((ELAPSED + 2))
 done
-
-echo "k3s is ready"
 
 BLEATER_NS="bleater"
 LOG_NS="logging"
@@ -31,6 +28,7 @@ PODS_FILE="/tmp/bleat-service-original-pods"
 kubectl create namespace "${BLEATER_NS}" --dry-run=client -o yaml | kubectl apply -f -
 kubectl create namespace "${LOG_NS}" --dry-run=client -o yaml | kubectl apply -f -
 
+# --- REDIS MOCK DEPLOYMENT ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
 kind: ConfigMap
@@ -40,27 +38,19 @@ metadata:
 data:
   redis_server.py: |
     import socketserver
-
-
     class Handler(socketserver.StreamRequestHandler):
         def handle(self):
             try:
                 while True:
                     line = self.rfile.readline()
-                    if not line:
-                        return
+                    if not line: return
                     if b"PING" in line.upper():
                         self.wfile.write(b"+PONG\r\n")
                         self.wfile.flush()
                         return
-            except Exception:
-                return
-
-
+            except Exception: return
     class Server(socketserver.ThreadingTCPServer):
         allow_reuse_address = True
-
-
     Server(("", 6379), Handler).serve_forever()
 EOF
 
@@ -106,9 +96,10 @@ spec:
   ports:
   - name: redis
     port: 6379
-    targetPort: 6379
+    targetPort: 6380  # <--- SABOTAGE: Wrong target port! (Investigation Layer 1)
 EOF
 
+# --- LOKI MOCK ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
 kind: ConfigMap
@@ -117,35 +108,24 @@ metadata:
   namespace: logging
 data:
   server.py: |
-    import json
-    import os
-    import re
-    import urllib.parse
+    import json, os, re, urllib.parse
     from http.server import BaseHTTPRequestHandler, HTTPServer
-
     STORE = "/data/logs.jsonl"
     os.makedirs("/data", exist_ok=True)
     open(STORE, "a", encoding="utf-8").close()
-
 
     def load_entries():
         entries = []
         with open(STORE, "r", encoding="utf-8") as handle:
             for line in handle:
                 line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entries.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
+                if not line: continue
+                try: entries.append(json.loads(line))
+                except json.JSONDecodeError: continue
         return entries
 
-
     class Handler(BaseHTTPRequestHandler):
-        def log_message(self, format, *args):
-            return
-
+        def log_message(self, format, *args): return
         def _send(self, status, payload):
             body = json.dumps(payload).encode("utf-8")
             self.send_response(status)
@@ -153,72 +133,27 @@ data:
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
-
         def do_POST(self):
             if self.path != "/loki/api/v1/push":
-                self._send(404, {"status": "error", "error": "not found"})
+                self._send(404, {"status": "error"})
                 return
-
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
-
             with open(STORE, "a", encoding="utf-8") as handle:
                 for stream in payload.get("streams", []):
                     labels = stream.get("stream", {})
                     for ts, message in stream.get("values", []):
-                        handle.write(
-                            json.dumps(
-                                {"ts": str(ts), "labels": labels, "message": message}
-                            )
-                            + "\n"
-                        )
-
+                        handle.write(json.dumps({"ts": str(ts), "labels": labels, "message": message}) + "\n")
             self._send(204, {})
-
         def do_GET(self):
             parsed = urllib.parse.urlparse(self.path)
             if parsed.path == "/ready":
                 self._send(200, {"status": "ready"})
                 return
-
-            if parsed.path == "/debug/logs":
-                self._send(200, {"entries": load_entries()})
-                return
-
             if parsed.path != "/loki/api/v1/query":
-                self._send(404, {"status": "error", "error": "not found"})
+                self._send(404, {"status": "error"})
                 return
-
-            query = urllib.parse.parse_qs(parsed.query).get("query", [""])[0]
-            app_match = re.search(r'app=\"([^\"]+)\"', query)
-            level_match = re.search(r'level=\"([^\"]+)\"', query)
-            app = app_match.group(1) if app_match else None
-            level = level_match.group(1) if level_match else None
-
-            result_map = {}
-            for entry in load_entries():
-                labels = entry.get("labels", {})
-                if app and labels.get("app") != app:
-                    continue
-                if level and labels.get("level") != level:
-                    continue
-                key = tuple(sorted(labels.items()))
-                if key not in result_map:
-                    result_map[key] = {"stream": labels, "values": []}
-                result_map[key]["values"].append([entry.get("ts", "0"), entry.get("message", "")])
-
-            self._send(
-                200,
-                {
-                    "status": "success",
-                    "data": {
-                        "resultType": "streams",
-                        "result": list(result_map.values()),
-                    },
-                },
-            )
-
-
+            self._send(200, {"status": "success", "data": {"resultType": "streams", "result": []}})
     HTTPServer(("", 3100), Handler).serve_forever()
 EOF
 
@@ -244,17 +179,17 @@ spec:
         command: ["python", "/app/server.py"]
         ports:
         - containerPort: 3100
-        volumeMounts:
-        - name: app
-          mountPath: /app
-        - name: data
-          mountPath: /data
         readinessProbe:
           httpGet:
             path: /ready
             port: 3100
           initialDelaySeconds: 2
           periodSeconds: 3
+        volumeMounts:
+        - name: app
+          mountPath: /app
+        - name: data
+          mountPath: /data
       volumes:
       - name: app
         configMap:
@@ -277,6 +212,7 @@ spec:
     targetPort: 3100
 EOF
 
+# --- BLEAT APP MOCK ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
 kind: ConfigMap
@@ -285,47 +221,23 @@ metadata:
   namespace: bleater
 data:
   app.py: |
-    import json
-    import os
-    import socket
-    import sys
-    import time
-    import urllib.parse
-    import urllib.request
+    import json, os, socket, sys, time, urllib.parse, urllib.request
     from http.server import BaseHTTPRequestHandler, HTTPServer
-
     REDIS_URL = os.environ.get("REDIS_URL", "")
     LOKI_URL = os.environ.get("LOKI_URL", "http://loki-gateway.logging.svc.cluster.local:3100")
     POD_NAME = os.environ.get("HOSTNAME", "bleat-service")
 
-
     def push_log(level, message):
-        payload = {
-            "streams": [
-                {
-                    "stream": {"app": "bleat-service", "level": level, "pod": POD_NAME},
-                    "values": [[str(int(time.time() * 1000000000)), message]],
-                }
-            ]
-        }
+        payload = {"streams": [{"stream": {"app": "bleat-service", "level": level, "pod": POD_NAME}, "values": [[str(int(time.time() * 1000000000)), message]]}]}
         body = json.dumps(payload).encode("utf-8")
-        request = urllib.request.Request(
-            LOKI_URL.rstrip("/") + "/loki/api/v1/push",
-            data=body,
-            headers={"Content-Type": "application/json"},
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=5):
-                pass
-        except Exception:
-            pass
+        request = urllib.request.Request(LOKI_URL.rstrip("/") + "/loki/api/v1/push", data=body, headers={"Content-Type": "application/json"})
+        try: urllib.request.urlopen(request, timeout=2)
+        except Exception: pass
         print(message, flush=True)
-
 
     def fail(message):
         push_log("error", message)
         sys.exit(1)
-
 
     if "\r" in REDIS_URL or "\n" in REDIS_URL:
         fail(f"invalid address: REDIS_URL contains control characters: {REDIS_URL!r}")
@@ -345,36 +257,24 @@ data:
         fail(f"invalid redis response: {response!r}")
 
     push_log("info", f"redis connection established to {parsed.hostname}:{parsed.port}")
-
-
     class Handler(BaseHTTPRequestHandler):
-        def log_message(self, format, *args):
-            return
-
+        def log_message(self, format, *args): return
         def do_GET(self):
             if self.path == "/ready":
                 self.send_response(200)
                 self.end_headers()
                 self.wfile.write(b"OK")
-                return
-
-            if self.path == "/debug/env":
+            else:
                 self.send_response(200)
                 self.end_headers()
-                self.wfile.write(repr(REDIS_URL).encode("utf-8"))
-                return
-
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"bleat-service")
-
-
     HTTPServer(("", 8080), Handler).serve_forever()
 EOF
 
-mkdir -p "${SCRIPT_DIR}/k8s" "${SCRIPT_DIR}/.gitea/workflows"
+# --- LOCAL REPO INITIALIZATION ---
+mkdir -p /root/bleater-app/k8s /root/bleater-app/.gitea/workflows /root/bleater-app/issues
+cd /root/bleater-app
 
-cat <<'EOF' > "${SCRIPT_DIR}/k8s/bleat-service-configmap.yaml"
+cat <<'EOF' > k8s/bleat-service-configmap.yaml
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -384,24 +284,34 @@ data:
   REDIS_URL: "redis://redis.bleater.svc.cluster.local:6379/0\r"
 EOF
 
-cat <<'EOF' > "${SCRIPT_DIR}/.gitea/workflows/bleat-ci.yaml"
+cat <<'EOF' > .gitea/workflows/bleat-ci.yaml
 name: bleat-ci
-
-on:
-  push:
-  pull_request:
-
+on: [push, pull_request]
 jobs:
   unit-tests:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Run unit tests
-        run: echo "tests passed"
+      - uses: actions/checkout@v4
+      - run: echo "tests passed"
 EOF
 
-kubectl apply -f "${SCRIPT_DIR}/k8s/bleat-service-configmap.yaml"
+# GUIDANCE: Mention connection refused errors. Hint at a possible service issue or networking issue.
+#           Don't mention "carriage return", "\r", or "port 6380".
+cat << 'EOF' > issues/issue-1-prod-down.md
+[USER: WRITE TITLE]
+
+[USER: WRITE BODY]
+EOF
+
+# GUIDANCE: Hint at config map weirdness. Mention needing a python script in CI.
+#           Don't mention exact fix commands.
+cat << 'EOF' > issues/issue-2-ci-flaky.md
+[USER: WRITE TITLE]
+
+[USER: WRITE BODY]
+EOF
+
+kubectl apply -f k8s/bleat-service-configmap.yaml
 
 cat <<'EOF' | kubectl apply -f -
 apiVersion: apps/v1
@@ -450,29 +360,13 @@ spec:
 EOF
 
 echo "Waiting for redis and loki deployments..."
-kubectl rollout status deployment/redis -n "${BLEATER_NS}" --timeout=180s
-kubectl rollout status deployment/loki-gateway -n "${LOG_NS}" --timeout=180s
+kubectl rollout status deployment/redis -n "${BLEATER_NS}" --timeout=180s || true
+kubectl rollout status deployment/loki-gateway -n "${LOG_NS}" --timeout=180s || true
 
 echo "Waiting for bleat-service pods to appear in broken state..."
-for _ in $(seq 1 30); do
-    if kubectl get pods -n "${BLEATER_NS}" -l app=bleat-service --no-headers 2>/dev/null | grep -q .; then
-        break
-    fi
-    sleep 2
-done
-
+sleep 10
 kubectl get deployment bleat-service -n "${BLEATER_NS}" -o jsonpath='{.metadata.uid}' > "${UID_FILE}"
 kubectl get pods -n "${BLEATER_NS}" -l app=bleat-service -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | sort > "${PODS_FILE}"
 chmod 400 "${UID_FILE}" "${PODS_FILE}"
 
-echo "Current ConfigMap value (normal views may hide carriage returns):"
-kubectl get configmap bleat-service-config -n "${BLEATER_NS}" -o jsonpath='{.data.REDIS_URL}' || true
-echo
-
-echo "Initial bleat-service pod status:"
-kubectl get pods -n "${BLEATER_NS}" -l app=bleat-service -o wide || true
-
-echo "Recent bleat-service logs:"
-kubectl logs -n "${BLEATER_NS}" deployment/bleat-service --tail=10 || true
-
-echo "Setup complete. The live ConfigMap is corrupted and the checked-out manifest plus CI workflow need repair."
+echo "Setup complete."

@@ -3,50 +3,52 @@ set -euo pipefail
 
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 BLEATER_NS="bleater"
+cd /root/bleater-app
 
-echo "Diagnosing hidden characters in REDIS_URL..."
-kubectl get configmap bleat-service-config -n "${BLEATER_NS}" \
-  -o jsonpath='{.data.REDIS_URL}' | cat -v
+echo "1. Fixing the Redis Service Port Routing..."
+kubectl patch service redis -n "${BLEATER_NS}" -p '{"spec":{"ports":[{"port": 6379, "targetPort": 6379, "name": "redis"}]}}'
+
+echo "2. Diagnosing hidden characters in REDIS_URL..."
+kubectl get configmap bleat-service-config -n "${BLEATER_NS}" -o jsonpath='{.data.REDIS_URL}' | cat -v
 echo
 
-mkdir -p k8s scripts .gitea/workflows
-MANIFEST="k8s/bleat-service-configmap.yaml"
+echo "3. Fixing manifest..."
+cat <<'EOF' > k8s/bleat-service-configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bleat-service-config
+  namespace: bleater
+data:
+  REDIS_URL: "redis://redis.bleater.svc.cluster.local:6379/0"
+EOF
 
-echo "Fixing manifest safely..."
-
-# CRLF -> LF
-sed -i 's/\r$//' "$MANIFEST"
-
-# Remove control chars except TAB and NEWLINE
-perl -i -pe 's/[\x00-\x08\x0B-\x1F\x7F]//g' "$MANIFEST"
-
-# Remove escaped CR encodings
-sed -i 's/\\r//g' "$MANIFEST"
-sed -i 's/\\x0d//gi' "$MANIFEST"
-sed -i 's/\\u000d//gi' "$MANIFEST"
-
-# Force exact value
-sed -i 's|REDIS_URL:.*|REDIS_URL: redis://redis.bleater.svc.cluster.local:6379/0|' "$MANIFEST"
-
-echo "Creating validation script..."
-cat > scripts/validate_configmap.py <<'PYEOF'
+echo "4. Creating validation script..."
+mkdir -p scripts
+cat <<'EOF' > scripts/validate_configmap.py
 #!/usr/bin/env python3
-import sys, pathlib, re
-CONTROL = re.compile(r"[\x00-\x08\x0B-\x1F\x7F]")
+import pathlib, re, sys
+CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 ESC = re.compile(r"(\\r|\\x0d|\\u000d)", re.I)
-def bad(t):
-    return "\r" in t or CONTROL.search(t) or ESC.search(t)
-rc = 0
+
+def check(p):
+    t=p.read_text()
+    if "\r" in t: return 1
+    if CONTROL.search(t): return 1
+    if ESC.search(t): return 1
+    return 0
+
+rc=0
 for f in sys.argv[1:]:
-    p = pathlib.Path(f)
-    if not p.exists() or bad(p.read_text()):
-        rc = 1
+    p=pathlib.Path(f)
+    if not p.exists(): rc=1
+    else: rc=max(rc,check(p))
 sys.exit(rc)
-PYEOF
+EOF
 chmod +x scripts/validate_configmap.py
 
-echo "Creating CI workflow..."
-cat > .gitea/workflows/bleat-ci.yaml <<'YAMLEOF'
+echo "5. Updating CI workflow..."
+cat <<'EOF' > .gitea/workflows/bleat-ci.yaml
 name: bleat-ci
 on: [push, pull_request]
 jobs:
@@ -55,32 +57,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: python3 scripts/validate_configmap.py k8s/bleat-service-configmap.yaml
-YAMLEOF
+EOF
 
-echo "Validating manifest..."
-python3 scripts/validate_configmap.py "$MANIFEST"
+echo "6. Applying fixed ConfigMap..."
+kubectl apply -f k8s/bleat-service-configmap.yaml
 
-echo "Applying fixed ConfigMap..."
-kubectl apply -f "$MANIFEST"
-
-echo "Rolling restart..."
+echo "7. Triggering rolling restart..."
 kubectl rollout restart deployment/bleat-service -n "${BLEATER_NS}"
 kubectl rollout status deployment/bleat-service -n "${BLEATER_NS}" --timeout=240s
 
-echo "Ensuring old pods gone..."
-kubectl get pods -n "${BLEATER_NS}" -o name \
-  | grep bleater-bleat-service \
-  | xargs -r kubectl delete -n "${BLEATER_NS}" --wait=true || true
-
-sleep 5
-
-echo "Verify pod env..."
-POD=$(kubectl get pods -n ${BLEATER_NS} -l app=bleat-service \
-  --field-selector=status.phase=Running \
-  -o jsonpath='{.items[0].metadata.name}')
-kubectl exec -n "${BLEATER_NS}" "$POD" -- printenv REDIS_URL
-
-echo "Check logs..."
-kubectl logs -n "${BLEATER_NS}" "$POD" | grep -i "redis connection established"
-
-echo "Done."
+echo "Task Remediated Successfully."
