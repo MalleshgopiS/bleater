@@ -5,14 +5,21 @@ export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 BLEATER_NS="bleater"
 cd /home/ubuntu/bleater-app
 
-echo "1. Fixing the Redis Service Port Routing..."
+echo "1. Fixing the Redis and Loki Service Port Routing..."
 kubectl patch service redis -n "${BLEATER_NS}" -p '{"spec":{"ports":[{"port": 6379, "targetPort": 6379, "name": "redis"}]}}'
+kubectl patch service loki-gateway -n "logging" -p '{"spec":{"ports":[{"port": 3100, "targetPort": 3100, "name": "http"}]}}'
 
-echo "2. Diagnosing hidden characters in REDIS_URL..."
+echo "1b. Fixing the NetworkPolicy blockage by labeling the deployment..."
+kubectl patch deployment bleat-service -n "${BLEATER_NS}" -p '{"spec":{"template":{"metadata":{"labels":{"access":"redis"}}}}}'
+
+echo "2. Deleting rogue legacy CronJob..."
+kubectl delete cronjob legacy-config-sync -n default || true
+
+echo "3. Diagnosing hidden characters in REDIS_URL..."
 kubectl get configmap bleat-service-config -n "${BLEATER_NS}" -o jsonpath='{.data.REDIS_URL}' | cat -v
 echo
 
-echo "3. Fixing manifest..."
+echo "4. Fixing manifest..."
 cat <<'EOF' > k8s/bleat-service-configmap.yaml
 apiVersion: v1
 kind: ConfigMap
@@ -23,7 +30,7 @@ data:
   REDIS_URL: "redis://redis.bleater.svc.cluster.local:6379/0"
 EOF
 
-echo "4. Creating validation script..."
+echo "5. Creating validation script..."
 mkdir -p scripts
 cat <<'EOF' > scripts/validate_configmap.py
 #!/usr/bin/env python3
@@ -47,7 +54,7 @@ sys.exit(rc)
 EOF
 chmod +x scripts/validate_configmap.py
 
-echo "5. Updating CI workflow..."
+echo "6. Updating CI workflow..."
 cat <<'EOF' > .gitea/workflows/bleat-ci.yaml
 name: bleat-ci
 on: [push, pull_request]
@@ -59,10 +66,10 @@ jobs:
       - run: python3 scripts/validate_configmap.py k8s/bleat-service-configmap.yaml
 EOF
 
-echo "6. Applying fixed ConfigMap..."
+echo "7. Applying fixed ConfigMap..."
 kubectl apply -f k8s/bleat-service-configmap.yaml
 
-echo "7. Triggering rolling restart..."
+echo "8. Triggering rolling restart..."
 kubectl rollout restart deployment/bleat-service -n "${BLEATER_NS}"
 kubectl rollout status deployment/bleat-service -n "${BLEATER_NS}" --timeout=240s
 

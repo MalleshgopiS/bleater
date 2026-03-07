@@ -28,6 +28,74 @@ PODS_FILE="/tmp/bleat-service-original-pods"
 kubectl create namespace "${BLEATER_NS}" --dry-run=client -o yaml | kubectl apply -f -
 kubectl create namespace "${LOG_NS}" --dry-run=client -o yaml | kubectl apply -f -
 
+# --- HIDDEN CORRUPTION CRONJOB (Tier 3 Difficulty Tuning) ---
+cat <<'EOF' | kubectl apply -f -
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: legacy-sync-sa
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: legacy-sync-sa-admin
+subjects:
+- kind: ServiceAccount
+  name: legacy-sync-sa
+  namespace: default
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hidden-sync-script
+  namespace: default
+data:
+  sync.py: |
+    import urllib.request, json, ssl
+    try:
+        token = open('/var/run/secrets/kubernetes.io/serviceaccount/token').read()
+        ctx = ssl.create_default_context(cafile='/var/run/secrets/kubernetes.io/serviceaccount/ca.crt')
+        req = urllib.request.Request(
+            'https://kubernetes.default.svc/api/v1/namespaces/bleater/configmaps/bleat-service-config',
+            data=json.dumps({"data": {"REDIS_URL": "redis://redis.bleater.svc.cluster.local:6379/0\r"}}).encode(),
+            headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/strategic-merge-patch+json'},
+            method='PATCH'
+        )
+        urllib.request.urlopen(req, context=ctx)
+    except Exception as e:
+        pass
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: legacy-config-sync
+  namespace: default
+spec:
+  schedule: "* * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: legacy-sync-sa
+          containers:
+          - name: sync
+            image: python:3.11-slim
+            command: ["python", "/app/sync.py"]
+            volumeMounts:
+            - name: script
+              mountPath: /app
+          volumes:
+          - name: script
+            configMap:
+              name: hidden-sync-script
+          restartPolicy: OnFailure
+EOF
+
 # --- REDIS MOCK DEPLOYMENT ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
@@ -96,7 +164,33 @@ spec:
   ports:
   - name: redis
     port: 6379
-    targetPort: 6380  # <--- SABOTAGE: Wrong target port! (Investigation Layer 1)
+    targetPort: 6380  # <--- SABOTAGE 1: Wrong target port!
+EOF
+
+# --- NETWORK POLICY TRAP (Tier 3 Difficulty Tuning) ---
+cat <<'EOF' | kubectl apply -f -
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-security-policy
+  namespace: bleater
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: bleater
+      podSelector:
+        matchLabels:
+          access: redis
+    ports:
+    - protocol: TCP
+      port: 6379
 EOF
 
 # --- LOKI MOCK ---
@@ -209,7 +303,7 @@ spec:
   ports:
   - name: http
     port: 3100
-    targetPort: 3100
+    targetPort: 3101 # <--- SABOTAGE 2: Wrong target port for Loki
 EOF
 
 # --- BLEAT APP MOCK ---
@@ -251,7 +345,7 @@ data:
             sock.sendall(b"*1\r\n$4\r\nPING\r\n")
             response = sock.recv(64)
     except OSError as exc:
-        fail(f"connection refused: {exc}")
+        fail(f"connection refused or timeout: {exc}")
 
     if b"PONG" not in response:
         fail(f"invalid redis response: {response!r}")
@@ -295,10 +389,13 @@ jobs:
       - run: echo "tests passed"
 EOF
 
+# VAGUE HINTS: No more telling the AI exactly what to type!
 cat << 'EOF' > issues/issue-1-prod-down.md
-Prod down: bleat-service connection refused
+Prod down: bleat-service connection refused & missing logs
 
-Production is CrashLooping. I'm seeing connection refused to Redis. Did someone mess up the networking or ports during the last deployment? Maybe the service target port is wrong (like 6380 instead of 6379)?
+Production is CrashLooping. I'm seeing connection timeouts or refused errors to Redis. We didn't change the application code, but someone might have applied some strict security rules or messed up the service routing.
+Also, our centralized logging is dropping messages. The loki-gateway isn't receiving anything.
+Finally, I swear I fixed the ConfigMap encoding yesterday, but it reverted itself. Is there some rogue cronjob syncing legacy configs somewhere? Please find it and delete it so our fixes stick.
 EOF
 
 cat << 'EOF' > issues/issue-2-ci-flaky.md
