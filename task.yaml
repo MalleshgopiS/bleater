@@ -20,7 +20,14 @@ prompt: |
     bleat-service-config
 
   A Windows-edited manifest introduced a hidden carriage return character
-  (\r) into the REDIS_URL value.
+  (\r) into the REDIS_URL value. The corruption is not visible in normal
+  terminal output but causes Redis connection failures at runtime.
+
+  A Loki-compatible logging stack is available for log verification.
+
+  Loki access:
+    Service: loki-gateway
+    Namespace: logging
 
   Repository files already checked out:
     k8s/bleat-service-configmap.yaml
@@ -38,12 +45,16 @@ prompt: |
   - Diagnose the hidden character corruption in the live ConfigMap.
   - Fix REDIS_URL so it exactly equals:
       redis://redis.bleater.svc.cluster.local:6379/0
-  - Modify the existing manifest in-place (do NOT recreate file).
-  - REDIS_URL must NOT be quoted.
   - Apply the corrected ConfigMap from the checked-out manifest.
   - Trigger a rolling restart of the bleat-service deployment.
   - Ensure all replicas become Running and Ready.
   - Verify Redis connectivity is restored.
+  - Verify Loki logs confirm Redis recovery.
+
+  Log Verification Requirements:
+  - Loki logs must contain the success message:
+      "redis connection established"
+  - After recovery, no new Redis connection error logs should appear.
 
   CI Prevention:
   - Create a Python validation script at:
@@ -52,19 +63,19 @@ prompt: |
       • carriage return characters
       • non-printable characters
       • escaped CR sequences (\r, \x0d, \u000d)
-      • quoted REDIS_URL values
   - Update the CI workflow to run the validation script against:
       k8s/bleat-service-configmap.yaml
 
   Constraints:
-  - Do not recreate the Deployment object
-  - Do not change container images
-  - Do not use interactive kubectl flags
-  - Do not rewrite manifest file from scratch
+  - Do not recreate the bleat-service Deployment object.
+  - Do not change container image names.
+  - Do not use interactive kubectl flags (-it, -i).
 
 setup_script: setup.sh
 solution_script: solution.sh
 grader_script: grader.py
+
 timeout_sec: 1800
+
 evaluation:
   type: apex

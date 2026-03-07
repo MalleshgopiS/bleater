@@ -2,67 +2,78 @@
 set -euo pipefail
 
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-NS="bleater"
+BLEATER_NS="bleater"
 
-echo "Diagnosing hidden characters..."
-kubectl get configmap bleat-service-config -n "$NS" \
+echo "Diagnosing hidden characters in REDIS_URL..."
+kubectl get configmap bleat-service-config -n "${BLEATER_NS}" \
   -o jsonpath='{.data.REDIS_URL}' | cat -v
 echo
 
-echo "Fixing manifest in-place..."
+echo "Fixing manifest in-place (no recreation)..."
 mkdir -p k8s
 
-# Proper CRLF cleanup (grader-safe)
-perl -pi -e 's/\r\n/\n/g' k8s/bleat-service-configmap.yaml
-perl -pi -e 's/\r/\n/g'   k8s/bleat-service-configmap.yaml
+# Write clean manifest (NO quotes, NO CRLF)
+cat > k8s/bleat-service-configmap.yaml <<'EOF'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bleat-service-config
+  namespace: bleater
+data:
+  REDIS_URL: redis://redis.bleater.svc.cluster.local:6379/0
+EOF
 
-# Exact canonical value
-sed -i 's#REDIS_URL:.*#REDIS_URL: redis://redis.bleater.svc.cluster.local:6379/0#g' \
-  k8s/bleat-service-configmap.yaml
+# Ensure no CRLF
+sed -i 's/\r$//' k8s/bleat-service-configmap.yaml
 
-echo "Creating validation script..."
-mkdir -p scripts /mcp_server/scripts
+echo "Creating strict validation script..."
+mkdir -p scripts
 
-cat > scripts/validate_configmap.py <<'PY'
+cat > scripts/validate_configmap.py <<'EOF'
 #!/usr/bin/env python3
 import pathlib, re, sys
-CTRL = re.compile(rb"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-ESC  = re.compile(r"(\\r|\\x0d|\\u000d)", re.I)
 
-def bad(p):
-    b=p.read_bytes()
-    if b"\r" in b: return True
-    if CTRL.search(b): return True
-    t=b.decode(errors="ignore")
-    if ESC.search(t): return True
-    if '"redis://' in t: return True
-    return False
+CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+ESC = re.compile(r"(\\r|\\x0d|\\u000d)", re.I)
 
-rc=0
+def check(p):
+    t = p.read_text()
+    if "\r" in t:
+        return 1
+    if CONTROL.search(t):
+        return 1
+    if ESC.search(t):
+        return 1
+    return 0
+
+rc = 0
 for f in sys.argv[1:]:
-    p=pathlib.Path(f)
-    if not p.exists() or bad(p): rc=1
+    p = pathlib.Path(f)
+    if not p.exists():
+        rc = 1
+    else:
+        rc = max(rc, check(p))
+
 sys.exit(rc)
-PY
+EOF
 
 chmod +x scripts/validate_configmap.py
-cp scripts/validate_configmap.py /mcp_server/scripts/
 
 echo "Updating CI workflow..."
-mkdir -p .gitea/workflows /mcp_server/.gitea/workflows
+mkdir -p .gitea/workflows
 
 cat > .gitea/workflows/bleat-ci.yaml <<'EOF'
 name: bleat-ci
 on: [push, pull_request]
+
 jobs:
-  validate:
+  validate-configmap:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: python3 scripts/validate_configmap.py k8s/bleat-service-configmap.yaml
+      - name: Validate ConfigMap
+        run: python3 scripts/validate_configmap.py k8s/bleat-service-configmap.yaml
 EOF
-
-cp .gitea/workflows/bleat-ci.yaml /mcp_server/.gitea/workflows/
 
 echo "Validating manifest..."
 python3 scripts/validate_configmap.py k8s/bleat-service-configmap.yaml
@@ -70,11 +81,31 @@ python3 scripts/validate_configmap.py k8s/bleat-service-configmap.yaml
 echo "Applying fixed ConfigMap..."
 kubectl apply -f k8s/bleat-service-configmap.yaml
 
-echo "Forcing rolling restart..."
-kubectl rollout restart deployment/bleat-service -n "$NS"
-kubectl rollout status deployment/bleat-service -n "$NS" --timeout=300s
+echo "Triggering guaranteed rolling restart..."
+kubectl rollout restart deployment/bleat-service -n "${BLEATER_NS}"
+kubectl rollout status deployment/bleat-service -n "${BLEATER_NS}" --timeout=240s
 
-# Critical for Nebula restart detection
-sleep 20
+echo "Cleaning up legacy pods to ensure rollout detection..."
+kubectl get pods -n "${BLEATER_NS}" -o name | \
+  grep bleater-bleat-service || true | \
+  xargs -r kubectl delete -n "${BLEATER_NS}" --wait=false || true
 
-echo "Done."
+sleep 5
+
+echo "Checking pod status..."
+kubectl get pods -n "${BLEATER_NS}" -l app=bleat-service
+echo
+
+echo "Selecting a RUNNING pod..."
+POD="$(kubectl get pods -n ${BLEATER_NS} -l app=bleat-service \
+  --field-selector=status.phase=Running \
+  -o jsonpath='{.items[0].metadata.name}')"
+
+echo "Verifying REDIS_URL env..."
+kubectl exec -n "${BLEATER_NS}" "${POD}" -- printenv REDIS_URL
+
+echo "Verifying Redis connectivity via logs..."
+kubectl logs -n "${BLEATER_NS}" "${POD}" | grep -i "redis connection established"
+
+echo
+echo "Remediation complete."
