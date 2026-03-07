@@ -9,29 +9,30 @@ kubectl get configmap bleat-service-config -n "${BLEATER_NS}" \
   -o jsonpath='{.data.REDIS_URL}' | cat -v
 echo
 
-echo "Fixing manifest CLEANLY..."
 mkdir -p k8s scripts .gitea/workflows
 MANIFEST="k8s/bleat-service-configmap.yaml"
 
-# 1. Normalize line endings
+echo "Fixing manifest safely..."
+
+# CRLF -> LF
 sed -i 's/\r$//' "$MANIFEST"
 
-# 2. Remove ALL binary control characters
-perl -i -pe 's/[\x00-\x1F\x7F]//g' "$MANIFEST"
+# Remove control chars except TAB and NEWLINE
+perl -i -pe 's/[\x00-\x08\x0B-\x1F\x7F]//g' "$MANIFEST"
 
-# 3. Remove escaped CR encodings
+# Remove escaped CR encodings
 sed -i 's/\\r//g' "$MANIFEST"
 sed -i 's/\\x0d//gi' "$MANIFEST"
 sed -i 's/\\u000d//gi' "$MANIFEST"
 
-# 4. Force exact value
+# Force exact value
 sed -i 's|REDIS_URL:.*|REDIS_URL: redis://redis.bleater.svc.cluster.local:6379/0|' "$MANIFEST"
 
 echo "Creating validation script..."
 cat > scripts/validate_configmap.py <<'PYEOF'
 #!/usr/bin/env python3
 import sys, pathlib, re
-CONTROL = re.compile(r"[\x00-\x1F\x7F]")
+CONTROL = re.compile(r"[\x00-\x08\x0B-\x1F\x7F]")
 ESC = re.compile(r"(\\r|\\x0d|\\u000d)", re.I)
 def bad(t):
     return "\r" in t or CONTROL.search(t) or ESC.search(t)
@@ -67,19 +68,19 @@ kubectl rollout restart deployment/bleat-service -n "${BLEATER_NS}"
 kubectl rollout status deployment/bleat-service -n "${BLEATER_NS}" --timeout=240s
 
 echo "Ensuring old pods gone..."
-kubectl get pods -n "${BLEATER_NS}" -o name | \
-  grep bleater-bleat-service | \
-  xargs -r kubectl delete -n "${BLEATER_NS}" --wait=true || true
+kubectl get pods -n "${BLEATER_NS}" -o name \
+  | grep bleater-bleat-service \
+  | xargs -r kubectl delete -n "${BLEATER_NS}" --wait=true || true
 
 sleep 5
 
-echo "Verifying pod env..."
+echo "Verify pod env..."
 POD=$(kubectl get pods -n ${BLEATER_NS} -l app=bleat-service \
   --field-selector=status.phase=Running \
   -o jsonpath='{.items[0].metadata.name}')
 kubectl exec -n "${BLEATER_NS}" "$POD" -- printenv REDIS_URL
 
-echo "Checking Redis logs..."
+echo "Check logs..."
 kubectl logs -n "${BLEATER_NS}" "$POD" | grep -i "redis connection established"
 
 echo "Done."
