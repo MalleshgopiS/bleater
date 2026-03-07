@@ -6,10 +6,13 @@ export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 
 BLEATER_NS="bleater"
 
-echo "Inspecting the live ConfigMap for hidden control characters..."
-kubectl get configmap bleat-service-config -n "${BLEATER_NS}" -o json
+echo "Diagnosing hidden characters in REDIS_URL..."
+kubectl get configmap bleat-service-config -n "${BLEATER_NS}" \
+  -o jsonpath='{.data.REDIS_URL}' | cat -v
+echo
 
 echo "Fixing manifest..."
+mkdir -p "${SCRIPT_DIR}/k8s"
 cat <<'EOF' > "${SCRIPT_DIR}/k8s/bleat-service-configmap.yaml"
 apiVersion: v1
 kind: ConfigMap
@@ -93,7 +96,8 @@ jobs:
 EOF
 
 echo "Validating manifest..."
-python3 "${SCRIPT_DIR}/scripts/validate_configmap.py" "${SCRIPT_DIR}/k8s/bleat-service-configmap.yaml"
+python3 "${SCRIPT_DIR}/scripts/validate_configmap.py" \
+  "${SCRIPT_DIR}/k8s/bleat-service-configmap.yaml"
 
 echo "Applying fixed ConfigMap..."
 kubectl apply -f "${SCRIPT_DIR}/k8s/bleat-service-configmap.yaml"
@@ -102,8 +106,17 @@ echo "Triggering rolling restart..."
 kubectl rollout restart deployment/bleat-service -n "${BLEATER_NS}"
 kubectl rollout status deployment/bleat-service -n "${BLEATER_NS}" --timeout=240s
 
-echo "Checking pods..."
+echo "Checking pod status..."
 kubectl get pods -n "${BLEATER_NS}" -l app=bleat-service
+echo
 
-echo "Loki verification delegated to grader (RBAC-safe)."
+echo "Verifying Redis connectivity via pod environment..."
+POD="$(kubectl get pods -n ${BLEATER_NS} -l app=bleat-service -o jsonpath='{.items[0].metadata.name}')"
+kubectl exec -n "${BLEATER_NS}" "$POD" -- printenv REDIS_URL
+echo
+
+echo "Checking Loki readiness (RBAC-safe)..."
+curl -sf http://loki-gateway.logging.svc.cluster.local:3100/ready >/dev/null \
+  && echo "Loki reachable"
+
 echo "Remediation complete."

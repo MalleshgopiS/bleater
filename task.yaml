@@ -1,7 +1,7 @@
 id: bleat-service-configmap-redis-crlf-corruption
 title: Bleat Service Redis ConfigMap Corrupted by Carriage Returns
 category: platform-eng
-difficulty: easy
+difficulty: medium
 horizon: short
 
 tags:
@@ -18,18 +18,18 @@ prompt: |
 
   A reduced copy of `bleat-service` is deployed in the `bleater` namespace.
   It reads `REDIS_URL` from ConfigMap `bleat-service-config`.
+
   A Windows-edited manifest was applied and the live ConfigMap now contains an
   embedded carriage return character (`\r`) in `REDIS_URL`.
 
-  The value looks normal in standard `kubectl get configmap` output, but
-  `bleat-service` fails to connect to Redis during startup and logs
-  `invalid address` or `connection refused`.
+  The value looks normal in standard output, but `bleat-service`
+  fails to connect to Redis during startup and logs
+  "invalid address" or "connection refused".
 
   A Loki-compatible log endpoint is available through service
   `loki-gateway` in the `logging` namespace.
 
-  The source-of-truth manifest and CI workflow are already checked out in this
-  task workspace:
+  The source-of-truth manifest and CI workflow are already checked out:
   - `k8s/bleat-service-configmap.yaml`
   - `.gitea/workflows/bleat-ci.yaml`
 
@@ -38,20 +38,29 @@ prompt: |
 
   Requirements:
   - Diagnose the hidden character corruption in the live ConfigMap.
-  - Fix `REDIS_URL` so it is clean and exactly
-    `redis://redis.bleater.svc.cluster.local:6379/0`.
+  - Fix `REDIS_URL` so it is clean and exactly:
+    redis://redis.bleater.svc.cluster.local:6379/0
   - Apply the corrected ConfigMap from the checked-out manifest.
   - Trigger a rolling restart of deployment `bleat-service`.
   - Restore the deployment so all replicas become Running and Ready.
-  - Verify Redis connectivity is restored and that Loki shows a successful
-    Redis connection after the fix.
-  - Add a CI validation step that prevents ConfigMaps with carriage returns or
-    other non-printable characters from being merged again.
+  - Verify Redis connectivity is restored.
+  - Verify Loki shows a successful Redis connection after the fix.
+
+  CI Prevention:
+  - Create a Python validation script at:
+      scripts/validate_configmap.py
+  - The script must reject manifests containing:
+      • carriage returns
+      • non-printable characters
+      • escaped CR sequences (\r, \x0d, \u000d)
+  - Update `.gitea/workflows/bleat-ci.yaml` to run the validation script
+    against:
+      k8s/bleat-service-configmap.yaml
 
   Constraints:
   - Do not recreate the `bleat-service` Deployment object.
   - Do not change image names.
-  - Do not use interactive flags such as `-i` or `-it`.
+  - Do not use interactive flags such as -i or -it.
 
 setup_script: setup.sh
 solution_script: solution.sh
@@ -66,4 +75,4 @@ evaluation:
 
 metadata:
   category: platform-eng
-  difficulty: easy
+  difficulty: medium
