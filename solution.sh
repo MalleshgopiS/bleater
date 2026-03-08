@@ -55,10 +55,11 @@ EOF
 echo "5. Apply fixed ConfigMap..."
 kubectl apply -f k8s/bleat-service-configmap.yaml
 
-echo "6. Rolling restart (UID preserved)..."
-kubectl rollout restart deployment/bleat-service -n "$BLEATER_NS"
+echo "6. Force new pod template (guaranteed rollout)..."
+kubectl patch deployment bleat-service -n "$BLEATER_NS" \
+  -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"fix-ts\":\"$(date +%s)\"}}}}}"
 
 echo "7. Wait for rollout..."
-kubectl rollout status deployment/bleat-service -n "$BLEATER_NS" --timeout=180s
+kubectl rollout status deployment/bleat-service -n "$BLEATER_NS" --timeout=300s
 
 echo "✅ Done"
