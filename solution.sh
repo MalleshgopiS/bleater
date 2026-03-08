@@ -6,12 +6,10 @@ APP_ROOT="/home/ubuntu/bleater-app"
 
 echo "1. Fix services..."
 
-# Fix Redis service port mapping
 kubectl patch service redis -n "${BLEATER_NS}" \
   --type merge \
   -p '{"spec":{"ports":[{"port":6379,"targetPort":6379}]}}' || true
 
-# Fix Loki gateway service port mapping
 kubectl patch service loki-gateway -n "${BLEATER_NS}" \
   --type merge \
   -p '{"spec":{"ports":[{"port":3100,"targetPort":3100}]}}' || true
@@ -19,7 +17,6 @@ kubectl patch service loki-gateway -n "${BLEATER_NS}" \
 
 echo "2. Stop hidden config corrupter..."
 
-# Remove hidden cronjob that re-corrupts ConfigMap
 kubectl delete cronjob legacy-config-sync -n "${BLEATER_NS}" --ignore-not-found || true
 kubectl delete configmap hidden-sync-script -n "${BLEATER_NS}" --ignore-not-found || true
 
@@ -28,11 +25,9 @@ echo "3. Clean repo ConfigMap manifest..."
 
 MANIFEST="${APP_ROOT}/k8s/bleat-service-configmap.yaml"
 
-if [ -f "${MANIFEST}" ]; then
-  # Remove CRLF and carriage returns
-  sed -i 's/\r$//' "${MANIFEST}"
-  sed -i 's/\\r//g' "${MANIFEST}"
-fi
+# Remove CRLF + escaped CR
+sed -i 's/\r$//' "${MANIFEST}"
+sed -i 's/\\r//g' "${MANIFEST}"
 
 
 echo "4. Validation script..."
@@ -41,24 +36,26 @@ mkdir -p "${APP_ROOT}/scripts"
 
 cat > "${APP_ROOT}/scripts/validate_configmap.py" << 'PY'
 #!/usr/bin/env python3
-import sys, re, pathlib
-
-CONTROL = re.compile(r"[\x00-\x1f\x7f]")
-ESC = re.compile(r"(\\r|\\x0d|\\u000d)", re.I)
+import sys, pathlib
 
 def bad(text):
-    return "\r" in text or CONTROL.search(text) or ESC.search(text)
+    if "\r" in text:
+        return True
+    for c in text:
+        if ord(c) < 32 and c not in ("\n", "\t"):
+            return True
+    if "\\r" in text or "\\x0d" in text or "\\u000d" in text:
+        return True
+    return False
 
 ok = True
-for path in sys.argv[1:]:
-    p = pathlib.Path(path)
-    if not p.exists():
-        print(f"Missing file: {p}", file=sys.stderr)
+for p in sys.argv[1:]:
+    path = pathlib.Path(p)
+    if not path.exists():
         ok = False
         continue
-    t = p.read_text(errors="ignore")
+    t = path.read_text(errors="ignore")
     if bad(t):
-        print(f"Invalid control characters in {p}", file=sys.stderr)
         ok = False
 
 sys.exit(1 if not ok else 0)
@@ -86,24 +83,21 @@ jobs:
 YAML
 
 
-echo "6. Replace live ConfigMap (CRLF fix)..."
+echo "6. Replace live ConfigMap (clean apply)..."
 
 kubectl delete configmap bleat-service-config -n "${BLEATER_NS}" --ignore-not-found
 
-kubectl create configmap bleat-service-config \
-  --from-literal=REDIS_URL=redis://redis.bleater.svc.cluster.local:6379/0 \
-  -n "${BLEATER_NS}"
+kubectl apply -f "${MANIFEST}"
 
 
-echo "7. Force rolling restart (UID preserved)..."
+echo "7. Proper rolling restart..."
 
-# Delete pods instead of rollout status (more reliable in cloud)
-kubectl delete pod -n "${BLEATER_NS}" -l app=bleat-service --wait=false || true
+kubectl rollout restart deployment bleat-service -n "${BLEATER_NS}"
+kubectl rollout status deployment bleat-service -n "${BLEATER_NS}" --timeout=180s
 
 
-echo "8. Stabilization wait..."
+echo "8. Wait for app to stabilize..."
 
-sleep 45
-
+sleep 60
 
 echo "Done."
