@@ -9,19 +9,11 @@ echo "1. Fixing the Redis and Loki Service Port Routing..."
 kubectl patch service redis -n "${BLEATER_NS}" -p '{"spec":{"ports":[{"port": 6379, "targetPort": 6379, "name": "redis"}]}}'
 kubectl patch service loki-gateway -n "logging" -p '{"spec":{"ports":[{"port": 3100, "targetPort": 3100, "name": "http"}]}}'
 
-echo "1b. Fixing the NetworkPolicy blockage by labeling the deployment..."
-kubectl patch deployment bleat-service -n "${BLEATER_NS}" -p '{"spec":{"template":{"metadata":{"labels":{"access":"redis"}}}}}'
-
-echo "1c. Fixing the Redis Authentication Secret..."
-# We explicitly recreate the secret to avoid trailing newline/encoding issues from patching
-kubectl delete secret bleat-service-auth -n "${BLEATER_NS}" --ignore-not-found
-kubectl create secret generic bleat-service-auth -n "${BLEATER_NS}" --from-literal=REDIS_PASSWORD=bleater-super-secret-99
-
 echo "2. Deleting rogue legacy CronJob..."
 kubectl delete cronjob legacy-config-sync -n default || true
 
 echo "3. Diagnosing hidden characters in REDIS_URL..."
-kubectl get configmap bleat-service-config -n "${BLEATER_NS}" -o jsonpath='{.data.REDIS_URL}' | cat -v
+kubectl get configmap bleat-service-config -n "${BLEATER_NS}" -o jsonpath='{.data.REDIS_URL}' | cat -v || true
 echo
 
 echo "4. Fixing manifest..."
@@ -74,8 +66,12 @@ EOF
 echo "7. Applying fixed ConfigMap..."
 kubectl apply -f k8s/bleat-service-configmap.yaml
 
-echo "8. Triggering rolling restart..."
-kubectl rollout restart deployment/bleat-service -n "${BLEATER_NS}"
+echo "8. Fixing the NetworkPolicy blockage and triggering restart..."
+# Applying this label patch automatically triggers the rollout
+# ONLY doing this after all configs are completely clean!
+kubectl patch deployment bleat-service -n "${BLEATER_NS}" -p '{"spec":{"template":{"metadata":{"labels":{"access":"redis"}}}}}'
+
+echo "9. Waiting for clean rollout to complete..."
 kubectl rollout status deployment/bleat-service -n "${BLEATER_NS}" --timeout=240s
 
 echo "Task Remediated Successfully."
