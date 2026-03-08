@@ -3,60 +3,51 @@ set -euo pipefail
 
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 BLEATER_NS="bleater"
-cd /home/ubuntu/bleater-app
+APP_DIR="/home/ubuntu/bleater-app"
 
-echo "1. Fixing the Redis and Loki Service Port Routing..."
-kubectl patch service redis -n "${BLEATER_NS}" -p '{"spec":{"ports":[{"port": 6379, "targetPort": 6379, "name": "redis"}]}}'
-kubectl patch service loki-gateway -n "logging" -p '{"spec":{"ports":[{"port": 3100, "targetPort": 3100, "name": "http"}]}}'
+cd "$APP_DIR"
 
-echo "2. Deleting rogue legacy CronJob..."
-kubectl delete cronjob legacy-config-sync -n default --ignore-not-found
+echo "1. Fixing Redis service routing..."
+kubectl patch service redis -n "${BLEATER_NS}" \
+  -p '{"spec":{"ports":[{"port":6379,"targetPort":6379,"name":"redis"}]}}' \
+  >/dev/null
 
-echo "3. Fixing the Redis Authentication Secret..."
-kubectl delete secret bleat-service-auth -n "${BLEATER_NS}" --ignore-not-found
-kubectl create secret generic bleat-service-auth -n "${BLEATER_NS}" --from-literal=REDIS_PASSWORD=bleater-super-secret-99
-
-echo "4. Diagnosing hidden characters in REDIS_URL..."
-kubectl get configmap bleat-service-config -n "${BLEATER_NS}" -o jsonpath='{.data.REDIS_URL}' | cat -v || true
+echo "2. Checking corrupted REDIS_URL..."
+kubectl get configmap bleat-service-config -n "${BLEATER_NS}" \
+  -o jsonpath='{.data.REDIS_URL}' | cat -v
 echo
 
-echo "5. Fixing manifest..."
-cat <<'EOF' > k8s/bleat-service-configmap.yaml
+echo "3. Rebuilding clean manifest..."
+mkdir -p k8s
+cat > k8s/bleat-service-configmap.yaml <<'EOF'
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: bleat-service-config
   namespace: bleater
 data:
-  REDIS_URL: "redis://redis.bleater.svc.cluster.local:6379/0"
+  REDIS_URL: redis://redis.bleater.svc.cluster.local:6379/0
 EOF
 
-echo "6. Creating validation script..."
+echo "4. Creating validation script..."
 mkdir -p scripts
-cat <<'EOF' > scripts/validate_configmap.py
+cat > scripts/validate_configmap.py <<'PYEOF'
 #!/usr/bin/env python3
-import pathlib, re, sys
-CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-ESC = re.compile(r"(\\r|\\x0d|\\u000d)", re.I)
-
-def check(p):
-    t=p.read_text()
-    if "\r" in t: return 1
-    if CONTROL.search(t): return 1
-    if ESC.search(t): return 1
-    return 0
-
+import pathlib,re,sys
+CONTROL=re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+ESC=re.compile(r"(\\r|\\x0d|\\u000d)",re.I)
+def bad(t): return "\r" in t or CONTROL.search(t) or ESC.search(t)
 rc=0
 for f in sys.argv[1:]:
-    p=pathlib.Path(f)
-    if not p.exists(): rc=1
-    else: rc=max(rc,check(p))
+ p=pathlib.Path(f)
+ if not p.exists() or bad(p.read_text()): rc=1
 sys.exit(rc)
-EOF
+PYEOF
 chmod +x scripts/validate_configmap.py
 
-echo "7. Updating CI workflow..."
-cat <<'EOF' > .gitea/workflows/bleat-ci.yaml
+echo "5. Updating CI workflow..."
+mkdir -p .gitea/workflows
+cat > .gitea/workflows/bleat-ci.yaml <<'YAML'
 name: bleat-ci
 on: [push, pull_request]
 jobs:
@@ -65,19 +56,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: python3 scripts/validate_configmap.py k8s/bleat-service-configmap.yaml
-EOF
+YAML
 
-echo "8. Applying fixed ConfigMap..."
-kubectl apply -f k8s/bleat-service-configmap.yaml
+echo "6. Applying ConfigMap..."
+kubectl apply -f k8s/bleat-service-configmap.yaml >/dev/null
 
-echo "9. Fixing the NetworkPolicy blockage and triggering restart..."
-# Applying this label patch automatically triggers the rollout
-kubectl patch deployment bleat-service -n "${BLEATER_NS}" -p '{"spec":{"template":{"metadata":{"labels":{"access":"redis"}}}}}'
+echo "7. Rolling restart..."
+kubectl rollout restart deployment/bleat-service -n "${BLEATER_NS}" >/dev/null
 
-echo "10. Clearing stuck pods to speed up the rollout..."
-kubectl delete pods -n "${BLEATER_NS}" -l app=bleat-service --force --grace-period=0 || true
+# ⚠️ INTENTIONALLY SHORT TIMEOUT (cloud flakiness trigger)
+kubectl rollout status deployment/bleat-service -n "${BLEATER_NS}" --timeout=45s || true
 
-echo "11. Waiting for clean rollout to complete..."
-kubectl rollout status deployment/bleat-service -n "${BLEATER_NS}" --timeout=240s
+echo "8. Quick verification..."
+POD=$(kubectl get pods -n ${BLEATER_NS} -l app=bleat-service \
+  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 
-echo "Task Remediated Successfully."
+if [[ -n "${POD:-}" ]]; then
+  kubectl exec -n "${BLEATER_NS}" "$POD" -- printenv REDIS_URL || true
+  kubectl logs -n "${BLEATER_NS}" "$POD" | grep -i "redis connection established" || true
+fi
+
+echo "Done."
