@@ -54,18 +54,6 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 EOF
 
-# 🚨 THE QUOTA TRAP: This silently prevents rolling restarts!
-cat <<'EOF' | kubectl apply -f -
-apiVersion: v1
-kind: ResourceQuota
-metadata:
-  name: bleater-strict-quota
-  namespace: bleater
-spec:
-  hard:
-    pods: "2"
-EOF
-
 # --- REDIS MOCK DEPLOYMENT (Robust TCP parsing & Auth) ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
@@ -514,6 +502,20 @@ for i in {1..30}; do
     sleep 2
 done
 sleep 2
+
+# 🚨 THE QUOTA TRAP: Calculated dynamically AFTER pods spin up to silently freeze the namespace!
+echo "Applying strict ResourceQuota trap..."
+TOTAL_PODS=$(kubectl get pods -n "${BLEATER_NS}" --no-headers 2>/dev/null | wc -l)
+cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: bleater-strict-quota
+  namespace: bleater
+spec:
+  hard:
+    pods: "${TOTAL_PODS}"
+EOF
 
 kubectl get deployment bleat-service -n "${BLEATER_NS}" -o jsonpath='{.metadata.uid}' > "${UID_FILE}"
 
