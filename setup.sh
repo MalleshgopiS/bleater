@@ -285,6 +285,10 @@ data:
     LOKI_URL = os.environ.get("LOKI_URL", "http://loki-gateway.logging.svc.cluster.local:3100")
     POD_NAME = os.environ.get("HOSTNAME", "bleat-service")
 
+    if os.environ.get("ENABLE_FAST_ROUTING") != "1":
+        print("FATAL: core component initialization failed (code: CFR-001).", flush=True)
+        sys.exit(1)
+
     if os.environ.get("_cap_mode_flag") != "true" or not os.environ.get("_MIN_TTL_FLOOR_MS"):
         print("FATAL: Missing internal cap_mode or TTL floor configurations. Halting.", flush=True)
         sys.exit(1)
@@ -370,6 +374,8 @@ The bleat-service pods are failing to start properly. I checked the application 
 Please investigate the cluster state and resolve whatever cascading failures are blocking the service from reaching a healthy `Running` state and connecting to the datastore.
 
 Additionally, no logs are showing up in the centralized Loki dashboard. Please fix the log delivery pipeline as well so we can verify the success messages.
+
+IMPORTANT: The platform team updated the runtime constraints yesterday. All core services must now explicitly opt-in to the new fast routing datapath to pass the CFR-001 check. You must add `ENABLE_FAST_ROUTING=1` to the container environment variables directly in the Deployment manifest, otherwise it will crash-loop on boot.
 EOF
 
 cat << 'EOF' > issues/issue-2-ci-flaky.md
@@ -493,7 +499,6 @@ kubectl rollout status deployment/redis -n "${BLEATER_NS}" --timeout=180s || tru
 kubectl rollout status deployment/loki-gateway -n "${LOG_NS}" --timeout=180s || true
 
 echo "Waiting for bleat-service pods to appear in broken state..."
-# FIX: Robustly wait until the Deployment has successfully generated its initial pods
 for i in {1..30}; do
     count=$(kubectl get pods -n "${BLEATER_NS}" -l app=bleat-service --no-headers 2>/dev/null | grep "^bleat-service-" | wc -l || echo "0")
     if [ "$count" -ge 2 ]; then

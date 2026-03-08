@@ -23,6 +23,7 @@ prompt: |
   Defects span:
   - Configuration Encoding: Silent character encoding drifts (e.g., carriage returns or non-printable ASCII) must be stripped from the caching layer's connection strings without altering the canonical URI structure.
   - Service Discovery & Routing: Ensure the internal Kubernetes service routing is correctly mapping traffic to the Redis datastore, accounting for any misconfigured target ports left by previous deployments.
+  - Runtime Constraints: Ensure all mandatory environment variables for the new datapath are injected into the Deployment, as explicitly outlined in the issue tracker.
   - CI/CD Prevention Pipeline: The engineering team requires strict pre-commit hooks. You must implement the exact preventative CI validation scripts and workflow updates requested in the issue tracker to prevent future Windows-style line ending corruption.
 
   Evaluation policy is strict. The incident is considered fully resolved ONLY when:
