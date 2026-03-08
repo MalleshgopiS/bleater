@@ -12,6 +12,9 @@ kubectl patch service loki-gateway -n "logging" -p '{"spec":{"ports":[{"port": 3
 echo "1b. Fixing the NetworkPolicy blockage by labeling the deployment..."
 kubectl patch deployment bleat-service -n "${BLEATER_NS}" -p '{"spec":{"template":{"metadata":{"labels":{"access":"redis"}}}}}'
 
+echo "1c. Fixing the Redis Authentication Secret..."
+kubectl patch secret bleat-service-auth -n "${BLEATER_NS}" -p '{"stringData":{"REDIS_PASSWORD":"bleater-super-secret-99"}}'
+
 echo "2. Deleting rogue legacy CronJob..."
 kubectl delete cronjob legacy-config-sync -n default || true
 

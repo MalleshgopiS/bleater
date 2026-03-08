@@ -96,7 +96,7 @@ spec:
           restartPolicy: OnFailure
 EOF
 
-# --- REDIS MOCK DEPLOYMENT ---
+# --- REDIS MOCK DEPLOYMENT (Now requires Auth) ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
 kind: ConfigMap
@@ -105,15 +105,29 @@ metadata:
   namespace: bleater
 data:
   redis_server.py: |
-    import socketserver
+    import socketserver, sys
+    expected_pass = sys.argv[1] if len(sys.argv) > 1 else None
     class Handler(socketserver.StreamRequestHandler):
         def handle(self):
             try:
+                authenticated = False if expected_pass else True
                 while True:
                     line = self.rfile.readline()
                     if not line: return
-                    if b"PING" in line.upper():
-                        self.wfile.write(b"+PONG\r\n")
+                    line_str = line.upper().decode('utf-8', errors='ignore')
+                    if "AUTH" in line_str:
+                        if expected_pass and expected_pass in line.decode('utf-8', errors='ignore'):
+                            authenticated = True
+                            self.wfile.write(b"+OK\r\n")
+                        else:
+                            self.wfile.write(b"-ERR invalid password\r\n")
+                        self.wfile.flush()
+                        continue
+                    if "PING" in line_str:
+                        if not authenticated:
+                            self.wfile.write(b"-NOAUTH Authentication required.\r\n")
+                        else:
+                            self.wfile.write(b"+PONG\r\n")
                         self.wfile.flush()
                         return
             except Exception: return
@@ -141,7 +155,7 @@ spec:
       containers:
       - name: redis
         image: python:3.11-slim
-        command: ["python", "/app/redis_server.py"]
+        command: ["python", "/app/redis_server.py", "bleater-super-secret-99"]
         ports:
         - containerPort: 6379
         volumeMounts:
@@ -167,7 +181,7 @@ spec:
     targetPort: 6380  # <--- SABOTAGE 1: Wrong target port!
 EOF
 
-# --- NETWORK POLICY TRAP (Tier 3 Difficulty Tuning) ---
+# --- NETWORK POLICY TRAP ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -318,6 +332,7 @@ data:
     import json, os, socket, sys, time, urllib.parse, urllib.request
     from http.server import BaseHTTPRequestHandler, HTTPServer
     REDIS_URL = os.environ.get("REDIS_URL", "")
+    REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD", "")
     LOKI_URL = os.environ.get("LOKI_URL", "http://loki-gateway.logging.svc.cluster.local:3100")
     POD_NAME = os.environ.get("HOSTNAME", "bleat-service")
 
@@ -342,12 +357,17 @@ data:
 
     try:
         with socket.create_connection((parsed.hostname, parsed.port), timeout=5) as sock:
+            if REDIS_PASSWORD:
+                sock.sendall(f"*2\r\n$4\r\nAUTH\r\n${len(REDIS_PASSWORD)}\r\n{REDIS_PASSWORD}\r\n".encode())
+                resp = sock.recv(64)
+                if b"-ERR" in resp: fail(f"redis auth failed: {resp.decode('utf-8', errors='ignore').strip()}")
+            
             sock.sendall(b"*1\r\n$4\r\nPING\r\n")
             response = sock.recv(64)
     except OSError as exc:
         fail(f"connection refused or timeout: {exc}")
 
-    if b"PONG" not in response:
+    if b"PONG" not in response and b"+OK" not in response:
         fail(f"invalid redis response: {response!r}")
 
     push_log("info", f"redis connection established to {parsed.hostname}:{parsed.port}")
@@ -365,7 +385,7 @@ data:
 EOF
 
 # --- LOCAL REPO INITIALIZATION ---
-mkdir -p /home/ubuntu/bleater-app/k8s /home/ubuntu/bleater-app/.gitea/workflows /home/ubuntu/bleater-app/issues
+mkdir -p /home/ubuntu/bleater-app/k8s /home/ubuntu/bleater-app/.gitea/workflows /home/ubuntu/bleater-app/issues /home/ubuntu/bleater-app/wiki
 cd /home/ubuntu/bleater-app
 
 cat <<'EOF' > k8s/bleat-service-configmap.yaml
@@ -389,13 +409,18 @@ jobs:
       - run: echo "tests passed"
 EOF
 
-# VAGUE HINTS: No more telling the AI exactly what to type!
+# TIER 3 SANITIZED HINTS: The AI is forced to debug manually now
 cat << 'EOF' > issues/issue-1-prod-down.md
-Prod down: bleat-service connection refused & missing logs
+Production is completely down!
 
-Production is CrashLooping. I'm seeing connection timeouts or refused errors to Redis. We didn't change the application code, but someone might have applied some strict security rules or messed up the service routing.
-Also, our centralized logging is dropping messages. The loki-gateway isn't receiving anything.
-Finally, I swear I fixed the ConfigMap encoding yesterday, but it reverted itself. Is there some rogue cronjob syncing legacy configs somewhere? Please find it and delete it so our fixes stick.
+The bleat-service is CrashLooping again. The logs just say "connection refused" or "NOAUTH" or something. 
+I don't know what happened, I just pushed a minor config change yesterday. Please figure out why it can't connect to the datastore. 
+
+Also, why aren't the logs showing up in our centralized logging dashboard? I can't debug anything without the Loki logs!
+
+Oh, and I heard the database team rotated the datastore credentials on Friday. I updated the wiki (`/home/ubuntu/bleater-app/wiki/credentials.md`) but I might have forgotten to update the actual Kubernetes secret for the service.
+
+Finally, I swear I fixed the ConfigMap encoding yesterday, but it mysteriously reverted itself after a few minutes! There must be some automation or sync job overriding my changes. Please track it down and delete it so our fixes actually stick!
 EOF
 
 cat << 'EOF' > issues/issue-2-ci-flaky.md
@@ -404,10 +429,20 @@ Need CI checks for bad line endings
 Someone pushed a config map with weird invisible characters (\r / carriage returns) that broke the connection string parsing. We need a pipeline validation script at `scripts/validate_configmap.py` to check for carriage returns in our k8s manifests, and run it in our CI workflow to stop this from happening.
 EOF
 
+cat << 'EOF' > wiki/credentials.md
+# Datastore Credentials
+We rotated the Redis credentials on Friday.
+New Password: `bleater-super-secret-99`
+Ensure all Kubernetes secrets are updated!
+EOF
+
 # Give the ubuntu user permission to edit these files
 chown -R ubuntu:ubuntu /home/ubuntu/bleater-app || chown -R 1000:1000 /home/ubuntu/bleater-app || true
 
 kubectl apply -f k8s/bleat-service-configmap.yaml
+
+# Create an outdated, incorrect secret
+kubectl create secret generic bleat-service-auth -n "${BLEATER_NS}" --from-literal=REDIS_PASSWORD=old-invalid-password
 
 cat <<'EOF' | kubectl apply -f -
 apiVersion: apps/v1
@@ -435,6 +470,11 @@ spec:
             configMapKeyRef:
               name: bleat-service-config
               key: REDIS_URL
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: bleat-service-auth
+              key: REDIS_PASSWORD
         - name: LOKI_URL
           value: http://loki-gateway.logging.svc.cluster.local:3100
         ports:
