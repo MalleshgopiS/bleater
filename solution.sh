@@ -15,6 +15,8 @@ kubectl patch service loki-gateway -n logging \
 
 echo "2. Stop hidden config corrupter..."
 kubectl delete cronjob legacy-config-sync -n "${BLEATER_NS}" --ignore-not-found
+kubectl delete job -n "${BLEATER_NS}" -l app=legacy-config-sync --ignore-not-found
+kubectl delete pod -n "${BLEATER_NS}" -l app=legacy-config-sync --ignore-not-found
 
 echo "3. Clean repo ConfigMap manifest..."
 mkdir -p k8s
@@ -57,20 +59,17 @@ jobs:
       - run: python3 scripts/validate_configmap.py k8s/bleat-service-configmap.yaml
 YAML
 
-echo "6. Replace live ConfigMap (CRLF fix)..."
+echo "6. Replace live ConfigMap..."
 kubectl delete configmap bleat-service-config -n "${BLEATER_NS}" --ignore-not-found
 kubectl create configmap bleat-service-config \
   --from-literal=REDIS_URL=redis://redis.bleater.svc.cluster.local:6379/0 \
   -n "${BLEATER_NS}"
 
-echo "7. Force rollout via annotation..."
-kubectl patch deployment bleat-service -n "${BLEATER_NS}" \
-  -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"restart-ts\":\"$(date +%s)\"}}}}}"
+echo "7. Proper rolling restart..."
+kubectl rollout restart deployment/bleat-service -n "${BLEATER_NS}"
+kubectl rollout status deployment/bleat-service -n "${BLEATER_NS}" --timeout=180s
 
-echo "8. Wait for rollout (local safe, cloud flaky)..."
-kubectl rollout status deployment/bleat-service -n "${BLEATER_NS}" --timeout=120s || true
-
-echo "9. Short stabilization..."
-sleep 10
+echo "8. Stabilization..."
+sleep 20
 
 echo "Done."
