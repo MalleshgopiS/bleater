@@ -7,6 +7,9 @@ APP_DIR="/home/ubuntu/bleater-app"
 
 cd "$APP_DIR"
 
+echo "0. Removing strict ResourceQuota blocking the rollout..."
+kubectl delete resourcequota bleater-strict-quota -n "${BLEATER_NS}" || true
+
 echo "1. Fixing the Redis and Loki Service Port Routing..."
 kubectl patch service redis -n "${BLEATER_NS}" -p '{"spec":{"ports":[{"port": 6379, "targetPort": 6379, "name": "redis"}]}}'
 kubectl patch service loki-gateway -n "logging" -p '{"spec":{"ports":[{"port": 3100, "targetPort": 3100, "name": "http"}]}}'
@@ -41,6 +44,7 @@ echo "6. Creating validation script..."
 mkdir -p scripts
 cat <<'EOF' > scripts/validate_configmap.py
 #!/usr/bin/env python3
+import ast
 import pathlib, re, sys
 CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 ESC = re.compile(r"(\\r|\\x0d|\\u000d)", re.I)

@@ -13,8 +13,6 @@ LOG_NS = "logging"
 DEPLOY = "bleat-service"
 CONFIGMAP = "bleat-service-config"
 EXPECTED_REDIS_URL = "redis://redis.bleater.svc.cluster.local:6379/0"
-
-# Fix: Ensure TASK_ROOT accurately points to the agent's working directory
 TASK_ROOT = Path("/home/ubuntu/bleater-app")
 UID_FILE = Path("/tmp/bleat-service-deployment-uid")
 PODS_FILE = Path("/tmp/bleat-service-original-pods")
@@ -47,7 +45,6 @@ def wait_for_ready(timeout: int = 150) -> bool:
     return False
 
 def get_running_pods():
-    # Fix: Safely parse JSON to avoid colliding with the "bleater-bleat-service" namespace artifact
     code, out, _ = run(f"kubectl get pods -n {BLEATER_NS} -l app={DEPLOY} -o json")
     if code != 0: return []
     try:
@@ -82,7 +79,6 @@ def check_live_configmap():
         data = configmap.get("data", {})
         redis_url = data.get("REDIS_URL", "")
         
-        # 🚨 THE TRAP VERIFICATION: Checks if the agent accidentally wiped the undocumented internal state
         if data.get("_ROUTING_RETRY_DELAY_MS") != "0": return False, "Implementation detail _ROUTING_RETRY_DELAY_MS missing or mutated"
         if data.get("_MIN_TTL_FLOOR_MS") != "3600": return False, "Implementation detail _MIN_TTL_FLOOR_MS missing or mutated"
         if data.get("_cap_mode_flag") != "true": return False, "Implementation detail _cap_mode_flag missing or mutated"
@@ -99,7 +95,6 @@ def check_repo_manifest():
     if not manifest.exists(): return False, "Checked-out ConfigMap manifest is missing"
     text = manifest.read_text(encoding="utf-8", errors="strict")
     
-    # 🚨 Ensures the agent actually fixed the repo file to include the undocumented state
     if "_ROUTING_RETRY_DELAY_MS" not in text or "_MIN_TTL_FLOOR_MS" not in text or "_cap_mode_flag" not in text:
         return False, "Harness file integrity compromised: missing production decoy constants in repo manifest"
 
@@ -111,16 +106,11 @@ def check_repo_manifest():
 def check_uid_preserved():
     if not UID_FILE.exists(): return False, "Missing stored original deployment UID"
     original_uid = UID_FILE.read_text(encoding="utf-8").strip()
-    code, out, err = run(f"kubectl get deployment {DEPLOY} -n {BLEATER_NS} -o json")
-    if code != 0: return False, f"Could not read current deployment: {err}"
-    
-    dep = json.loads(out)
-    current_uid = dep.get("metadata", {}).get("uid")
-    ann = dep.get("spec", {}).get("template", {}).get("metadata", {}).get("annotations", {})
+    code, current_uid, err = run(f"kubectl get deployment {DEPLOY} -n {BLEATER_NS} -o jsonpath='{{.metadata.uid}}'")
+    if code != 0: return False, f"Could not read current deployment UID: {err}"
     
     if original_uid != current_uid: return False, "Deployment UID changed; expected a rolling restart"
-    if ann.get("bleater.io/bind-count") != "1": return False, "Internal _bind_count annotation was destroyed"
-    return True, "Deployment object and bind_count preserved"
+    return True, "Deployment object was preserved"
 
 def check_rollout_restart():
     if not PODS_FILE.exists(): return False, "Missing original pod snapshot"
@@ -128,7 +118,7 @@ def check_rollout_restart():
     current_pods = set(get_running_pods())
     if bool(original_pods) and bool(current_pods) and original_pods.isdisjoint(current_pods):
         return True, "Pods were replaced during a rolling restart"
-    return False, f"Rolling restart not detected; old={list(original_pods)}, new={list(current_pods)}"
+    return False, "Rolling restart not detected"
 
 def check_deployment_ready():
     if wait_for_ready(timeout=150): return True, "bleat-service deployment is fully Ready"
@@ -164,6 +154,11 @@ def check_validation_script():
     script = TASK_ROOT / "scripts" / "validate_configmap.py"
     if not script.exists(): return False, "Validation script missing"
     
+    # 🚨 CHECK LINTER RULE
+    script_text = script.read_text(encoding="utf-8")
+    if "import ast" not in script_text:
+        return False, "Validation script missing mandatory 'ast' import for static analysis compliance"
+
     with tempfile.TemporaryDirectory() as tmpdir:
         good_manifest = Path(tmpdir) / "good.yaml"
         good_manifest.write_text("REDIS_URL: \"redis://redis.bleater.svc.cluster.local:6379/0\"", encoding="utf-8")

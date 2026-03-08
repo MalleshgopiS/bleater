@@ -54,72 +54,16 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 EOF
 
-# --- HIDDEN CORRUPTION CRONJOB (Tier 3 Difficulty Tuning) ---
+# 🚨 THE QUOTA TRAP: This silently prevents rolling restarts!
 cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
-kind: ServiceAccount
+kind: ResourceQuota
 metadata:
-  name: legacy-sync-sa
-  namespace: default
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: legacy-sync-sa-admin
-subjects:
-- kind: ServiceAccount
-  name: legacy-sync-sa
-  namespace: default
-roleRef:
-  kind: ClusterRole
-  name: cluster-admin
-  apiGroup: rbac.authorization.k8s.io
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: hidden-sync-script
-  namespace: default
-data:
-  sync.py: |
-    import urllib.request, json, ssl
-    try:
-        token = open('/var/run/secrets/kubernetes.io/serviceaccount/token').read()
-        ctx = ssl.create_default_context(cafile='/var/run/secrets/kubernetes.io/serviceaccount/ca.crt')
-        req = urllib.request.Request(
-            'https://kubernetes.default.svc/api/v1/namespaces/bleater/configmaps/bleat-service-config',
-            data=json.dumps({"data": {"REDIS_URL": "redis://redis.bleater.svc.cluster.local:6379/0\r"}}).encode(),
-            headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/strategic-merge-patch+json'},
-            method='PATCH'
-        )
-        urllib.request.urlopen(req, context=ctx)
-    except Exception as e:
-        pass
----
-apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: legacy-config-sync
-  namespace: default
+  name: bleater-strict-quota
+  namespace: bleater
 spec:
-  schedule: "* * * * *"
-  jobTemplate:
-    spec:
-      template:
-        spec:
-          serviceAccountName: legacy-sync-sa
-          containers:
-          - name: sync
-            image: python:3.11-slim
-            command: ["python", "/app/sync.py"]
-            volumeMounts:
-            - name: script
-              mountPath: /app
-          volumes:
-          - name: script
-            configMap:
-              name: hidden-sync-script
-          restartPolicy: OnFailure
+  hard:
+    pods: "2"
 EOF
 
 # --- REDIS MOCK DEPLOYMENT (Robust TCP parsing & Auth) ---

@@ -31,6 +31,7 @@ prompt: |
   - The service successfully establishes a connection to Redis, explicitly verifiable via log entries ingested by the Loki gateway in the `logging` namespace.
   - No new error logs appear in Loki after the recovery sequence.
   - All CI validation measures (both the custom Python verification script and the Gitea workflow) are active and correctly reject corrupted manifests.
+  - STRICT LINTER RULE: The new validation script must `import ast` at the top of the file to comply with our internal static analysis hooks, even if you rely primarily on regex for your logic.
 
   Constraints:
   - Do not recreate the `bleat-service` Deployment object (the original Kubernetes UID must be strictly preserved for audit trails). Use rolling restarts or stateless edits.
