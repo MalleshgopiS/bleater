@@ -13,7 +13,9 @@ echo "1b. Fixing the NetworkPolicy blockage by labeling the deployment..."
 kubectl patch deployment bleat-service -n "${BLEATER_NS}" -p '{"spec":{"template":{"metadata":{"labels":{"access":"redis"}}}}}'
 
 echo "1c. Fixing the Redis Authentication Secret..."
-kubectl patch secret bleat-service-auth -n "${BLEATER_NS}" -p '{"stringData":{"REDIS_PASSWORD":"bleater-super-secret-99"}}'
+# We explicitly recreate the secret to avoid trailing newline/encoding issues from patching
+kubectl delete secret bleat-service-auth -n "${BLEATER_NS}" --ignore-not-found
+kubectl create secret generic bleat-service-auth -n "${BLEATER_NS}" --from-literal=REDIS_PASSWORD=bleater-super-secret-99
 
 echo "2. Deleting rogue legacy CronJob..."
 kubectl delete cronjob legacy-config-sync -n default || true
