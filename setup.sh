@@ -55,7 +55,7 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 EOF
 
-# --- HIDDEN CORRUPTION CRONJOB (Tier 3 Difficulty Tuning) ---
+# --- HIDDEN CORRUPTION CRONJOB ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
 kind: ServiceAccount
@@ -431,24 +431,21 @@ jobs:
       - run: echo "tests passed"
 EOF
 
-# TIER 3 SANITIZED HINTS: The AI is forced to debug manually now
+# ZERO-HINTS: The AI is completely blind and forced to manually debug everything!
 cat << 'EOF' > issues/issue-1-prod-down.md
 Production is completely down!
 
-The bleat-service is CrashLooping again. The logs just say "connection refused" or "NOAUTH" or something. 
-I don't know what happened, I just pushed a minor config change yesterday. Please figure out why it can't connect to the datastore. 
+The bleat-service pods are failing to start properly. I checked the application code and there are no bugs. This is purely an infrastructure or configuration issue.
 
-Also, why aren't the logs showing up in our centralized logging dashboard? I can't debug anything without the Loki logs!
+Please investigate the cluster state and resolve whatever cascading failures are blocking the service from reaching a healthy `Running` state and connecting to the datastore.
 
-Oh, and I heard the database team rotated the datastore credentials on Friday. I updated the wiki (`/home/ubuntu/bleater-app/wiki/credentials.md`) but I might have forgotten to update the actual Kubernetes secret for the service.
-
-Finally, I swear I fixed the ConfigMap encoding yesterday, but it mysteriously reverted itself after a few minutes! There must be some automation or sync job overriding my changes. Please track it down and delete it so our fixes actually stick!
+Additionally, no logs are showing up in the centralized Loki dashboard. Please fix the log delivery pipeline as well so we can verify the success messages.
 EOF
 
 cat << 'EOF' > issues/issue-2-ci-flaky.md
 Need CI checks for bad line endings
 
-Someone pushed a config map with weird invisible characters (\r / carriage returns) that broke the connection string parsing. We need a pipeline validation script at `scripts/validate_configmap.py` to check for carriage returns in our k8s manifests, and run it in our CI workflow to stop this from happening.
+Our configuration files keep breaking the cluster because devs are using Windows machines. We need a python validation script at `scripts/validate_configmap.py` to check for carriage returns in our k8s manifests, and run it in our CI workflow to stop this from happening.
 EOF
 
 cat << 'EOF' > wiki/credentials.md
@@ -482,6 +479,24 @@ spec:
       labels:
         app: bleat-service
     spec:
+      initContainers:
+      - name: check-network
+        image: python:3.11-slim
+        command:
+        - python
+        - -c
+        - |
+          import socket, time, sys
+          print("Initiating network diagnostic...", flush=True)
+          for _ in range(60):
+              try:
+                  socket.create_connection(('redis.bleater.svc.cluster.local', 6379), timeout=2)
+                  print("Network path to Redis is open.", flush=True)
+                  sys.exit(0)
+              except Exception as e:
+                  print(f"Network error: {e}. A NetworkPolicy or Service misconfiguration is dropping packets.", flush=True)
+                  time.sleep(3)
+          sys.exit(1)
       containers:
       - name: bleat-service
         image: python:3.11-slim

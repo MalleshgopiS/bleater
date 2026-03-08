@@ -10,7 +10,7 @@ kubectl patch service redis -n "${BLEATER_NS}" -p '{"spec":{"ports":[{"port": 63
 kubectl patch service loki-gateway -n "logging" -p '{"spec":{"ports":[{"port": 3100, "targetPort": 3100, "name": "http"}]}}'
 
 echo "2. Deleting rogue legacy CronJob..."
-kubectl delete cronjob legacy-config-sync -n default || true
+kubectl delete cronjob legacy-config-sync -n default --ignore-not-found
 
 echo "3. Fixing the Redis Authentication Secret..."
 kubectl delete secret bleat-service-auth -n "${BLEATER_NS}" --ignore-not-found
@@ -72,10 +72,12 @@ kubectl apply -f k8s/bleat-service-configmap.yaml
 
 echo "9. Fixing the NetworkPolicy blockage and triggering restart..."
 # Applying this label patch automatically triggers the rollout
-# ONLY doing this after all configs are completely clean!
 kubectl patch deployment bleat-service -n "${BLEATER_NS}" -p '{"spec":{"template":{"metadata":{"labels":{"access":"redis"}}}}}'
 
-echo "10. Waiting for clean rollout to complete..."
+echo "10. Clearing stuck pods to speed up the rollout..."
+kubectl delete pods -n "${BLEATER_NS}" -l app=bleat-service --force --grace-period=0 || true
+
+echo "11. Waiting for clean rollout to complete..."
 kubectl rollout status deployment/bleat-service -n "${BLEATER_NS}" --timeout=240s
 
 echo "Task Remediated Successfully."
