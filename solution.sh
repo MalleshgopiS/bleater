@@ -12,11 +12,15 @@ kubectl patch service loki-gateway -n "logging" -p '{"spec":{"ports":[{"port": 3
 echo "2. Deleting rogue legacy CronJob..."
 kubectl delete cronjob legacy-config-sync -n default || true
 
-echo "3. Diagnosing hidden characters in REDIS_URL..."
+echo "3. Fixing the Redis Authentication Secret..."
+kubectl delete secret bleat-service-auth -n "${BLEATER_NS}" --ignore-not-found
+kubectl create secret generic bleat-service-auth -n "${BLEATER_NS}" --from-literal=REDIS_PASSWORD=bleater-super-secret-99
+
+echo "4. Diagnosing hidden characters in REDIS_URL..."
 kubectl get configmap bleat-service-config -n "${BLEATER_NS}" -o jsonpath='{.data.REDIS_URL}' | cat -v || true
 echo
 
-echo "4. Fixing manifest..."
+echo "5. Fixing manifest..."
 cat <<'EOF' > k8s/bleat-service-configmap.yaml
 apiVersion: v1
 kind: ConfigMap
@@ -27,7 +31,7 @@ data:
   REDIS_URL: "redis://redis.bleater.svc.cluster.local:6379/0"
 EOF
 
-echo "5. Creating validation script..."
+echo "6. Creating validation script..."
 mkdir -p scripts
 cat <<'EOF' > scripts/validate_configmap.py
 #!/usr/bin/env python3
@@ -51,7 +55,7 @@ sys.exit(rc)
 EOF
 chmod +x scripts/validate_configmap.py
 
-echo "6. Updating CI workflow..."
+echo "7. Updating CI workflow..."
 cat <<'EOF' > .gitea/workflows/bleat-ci.yaml
 name: bleat-ci
 on: [push, pull_request]
@@ -63,15 +67,15 @@ jobs:
       - run: python3 scripts/validate_configmap.py k8s/bleat-service-configmap.yaml
 EOF
 
-echo "7. Applying fixed ConfigMap..."
+echo "8. Applying fixed ConfigMap..."
 kubectl apply -f k8s/bleat-service-configmap.yaml
 
-echo "8. Fixing the NetworkPolicy blockage and triggering restart..."
+echo "9. Fixing the NetworkPolicy blockage and triggering restart..."
 # Applying this label patch automatically triggers the rollout
 # ONLY doing this after all configs are completely clean!
 kubectl patch deployment bleat-service -n "${BLEATER_NS}" -p '{"spec":{"template":{"metadata":{"labels":{"access":"redis"}}}}}'
 
-echo "9. Waiting for clean rollout to complete..."
+echo "10. Waiting for clean rollout to complete..."
 kubectl rollout status deployment/bleat-service -n "${BLEATER_NS}" --timeout=240s
 
 echo "Task Remediated Successfully."
