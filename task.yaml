@@ -1,7 +1,7 @@
 id: bleat-service-configmap-redis-crlf-corruption
 title: Bleat Service Redis ConfigMap Corrupted by Carriage Returns
 category: platform-eng
-difficulty: hard
+difficulty: medium
 horizon: short
 
 tags:
