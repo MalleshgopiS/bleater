@@ -297,8 +297,6 @@ data:
     LOKI_URL = os.environ.get("LOKI_URL", "http://loki-gateway.logging.svc.cluster.local:3100")
     POD_NAME = os.environ.get("HOSTNAME", "bleat-service")
 
-    # 🚨 HIDDEN IMPLEMENTATION DETAIL ENFORCEMENT
-    # If the agent wipes these variables from the ConfigMap, the app crashes!
     if os.environ.get("_cap_mode_flag") != "true" or not os.environ.get("_MIN_TTL_FLOOR_MS"):
         print("FATAL: Missing internal cap_mode or TTL floor configurations. Halting.", flush=True)
         sys.exit(1)
@@ -355,7 +353,6 @@ EOF
 mkdir -p /home/ubuntu/bleater-app/k8s /home/ubuntu/bleater-app/.gitea/workflows /home/ubuntu/bleater-app/issues /home/ubuntu/bleater-app/wiki
 cd /home/ubuntu/bleater-app
 
-# 🚨 THE TRAP: Local repo is deliberately missing the undocumented production variables!
 cat <<'EOF' > k8s/bleat-service-configmap.yaml
 apiVersion: v1
 kind: ConfigMap
@@ -377,7 +374,6 @@ jobs:
       - run: echo "tests passed"
 EOF
 
-# SANITIZED HINTS: The AI is forced to debug manually now
 cat << 'EOF' > issues/issue-1-prod-down.md
 Production is completely down!
 
@@ -403,7 +399,6 @@ EOF
 
 chown -R ubuntu:ubuntu /home/ubuntu/bleater-app || chown -R 1000:1000 /home/ubuntu/bleater-app || true
 
-# 🚨 LIVE PRODUCTION CREATION: Contains the variables the AI will accidentally delete
 cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
 kind: ConfigMap
@@ -417,7 +412,6 @@ data:
   _cap_mode_flag: "true"
 EOF
 
-# Create an outdated, incorrect secret
 kubectl create secret generic bleat-service-auth -n "${BLEATER_NS}" --from-literal=REDIS_PASSWORD=old-invalid-password
 
 cat <<'EOF' | kubectl apply -f -
@@ -511,10 +505,18 @@ kubectl rollout status deployment/redis -n "${BLEATER_NS}" --timeout=180s || tru
 kubectl rollout status deployment/loki-gateway -n "${LOG_NS}" --timeout=180s || true
 
 echo "Waiting for bleat-service pods to appear in broken state..."
-sleep 10
+# FIX: Robustly wait until the Deployment has successfully generated its initial pods
+for i in {1..30}; do
+    count=$(kubectl get pods -n "${BLEATER_NS}" -l app=bleat-service --no-headers 2>/dev/null | grep "^bleat-service-" | wc -l || echo "0")
+    if [ "$count" -ge 2 ]; then
+        break
+    fi
+    sleep 2
+done
+sleep 2
+
 kubectl get deployment bleat-service -n "${BLEATER_NS}" -o jsonpath='{.metadata.uid}' > "${UID_FILE}"
 
-# FIX: Robustly parse JSON to exclude terminating pods AND the "bleater-bleat-service" decoy
 kubectl get pods -n "${BLEATER_NS}" -l app=bleat-service -o json | python3 -c '
 import sys, json
 data = json.load(sys.stdin)
