@@ -13,7 +13,10 @@ kubectl patch service redis -n "${BLEATER_NS}" \
 kubectl patch service loki-gateway -n logging \
   -p '{"spec":{"ports":[{"port":3100,"targetPort":3100,"name":"http"}]}}' >/dev/null
 
-echo "2. Clean repo ConfigMap manifest..."
+echo "2. Stop hidden config corrupter..."
+kubectl delete cronjob legacy-config-sync -n "${BLEATER_NS}" --ignore-not-found
+
+echo "3. Clean repo ConfigMap manifest..."
 mkdir -p k8s
 cat > k8s/bleat-service-configmap.yaml <<'EOF'
 apiVersion: v1
@@ -25,7 +28,7 @@ data:
   REDIS_URL: redis://redis.bleater.svc.cluster.local:6379/0
 EOF
 
-echo "3. Validation script..."
+echo "4. Validation script..."
 mkdir -p scripts
 cat > scripts/validate_configmap.py <<'PYEOF'
 #!/usr/bin/env python3
@@ -41,7 +44,7 @@ sys.exit(rc)
 PYEOF
 chmod +x scripts/validate_configmap.py
 
-echo "4. CI workflow..."
+echo "5. CI workflow..."
 mkdir -p .gitea/workflows
 cat > .gitea/workflows/bleat-ci.yaml <<'YAML'
 name: bleat-ci
@@ -54,19 +57,20 @@ jobs:
       - run: python3 scripts/validate_configmap.py k8s/bleat-service-configmap.yaml
 YAML
 
-echo "5. Replace live ConfigMap (CRLF fix)..."
+echo "6. Replace live ConfigMap (CRLF fix)..."
 kubectl delete configmap bleat-service-config -n "${BLEATER_NS}" --ignore-not-found
 kubectl create configmap bleat-service-config \
   --from-literal=REDIS_URL=redis://redis.bleater.svc.cluster.local:6379/0 \
   -n "${BLEATER_NS}"
 
-echo "6. Rolling restart..."
-kubectl rollout restart deployment/bleat-service -n "${BLEATER_NS}" >/dev/null
+echo "7. Force rollout via annotation..."
+kubectl patch deployment bleat-service -n "${BLEATER_NS}" \
+  -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"restart-ts\":\"$(date +%s)\"}}}}}"
 
-# Slightly short wait → cloud flakiness
-kubectl rollout status deployment/bleat-service -n "${BLEATER_NS}" --timeout=90s || true
+echo "8. Wait for rollout (local safe, cloud flaky)..."
+kubectl rollout status deployment/bleat-service -n "${BLEATER_NS}" --timeout=120s || true
 
-echo "7. Quick stabilization..."
-sleep 8
+echo "9. Short stabilization..."
+sleep 10
 
 echo "Done."
