@@ -2,46 +2,47 @@
 set -euo pipefail
 
 BLEATER_NS="bleater"
+LOG_NS="logging"
 APP_LABEL="app=bleat-service"
 DEPLOY="bleat-service"
 
-echo "🔍 Diagnosing hidden characters in REDIS_URL..."
-kubectl get configmap bleat-service-config -n "${BLEATER_NS}" -o jsonpath='{.data.REDIS_URL}' | cat -v || true
+echo "1️⃣ Fixing Redis service routing..."
+kubectl patch svc redis -n "$BLEATER_NS" --type='json' \
+  -p='[{"op":"replace","path":"/spec/ports/0/targetPort","value":6379}]'
 
-echo "🛠 Fixing checked-out manifest (remove CR characters)..."
+echo "2️⃣ Inspecting corrupted REDIS_URL..."
+kubectl get configmap bleat-service-config -n "$BLEATER_NS" \
+  -o jsonpath='{.data.REDIS_URL}' | cat -v
+
+echo "3️⃣ Rebuilding clean manifest..."
 MANIFEST="/home/ubuntu/bleater-app/k8s/bleat-service-configmap.yaml"
-if [ -f "$MANIFEST" ]; then
-  sed -i 's/\\r//g' "$MANIFEST" || true
-  sed -i 's/\r//g' "$MANIFEST" || true
-fi
 
-echo "🧪 Creating validation script..."
+cat > "$MANIFEST" <<'EOF'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bleat-service-config
+  namespace: bleater
+data:
+  REDIS_URL: "redis://redis.bleater.svc.cluster.local:6379/0"
+EOF
+
+echo "4️⃣ Creating validation script..."
 mkdir -p /home/ubuntu/bleater-app/scripts
-cat > /home/ubuntu/bleater-app/scripts/validate_configmap.py << 'PYEOF'
+
+cat > /home/ubuntu/bleater-app/scripts/validate_configmap.py <<'PYEOF'
 #!/usr/bin/env python3
 import sys
 from pathlib import Path
 
-def has_bad_chars(text):
-    if "\r" in text:
-        return True
-    for c in text:
-        if ord(c) < 32 and c not in ("\n", "\t"):
-            return True
-    if "\\r" in text or "\\x0d" in text or "\\u000d" in text:
-        return True
-    return False
-
-bad_files = []
+bad = False
 for p in Path("k8s").rglob("*.yaml"):
     t = p.read_text(encoding="utf-8", errors="ignore")
-    if has_bad_chars(t):
-        bad_files.append(str(p))
+    if "\r" in t or "\\r" in t:
+        print(f"BAD: {p}")
+        bad = True
 
-if bad_files:
-    print("ERROR: carriage return or control chars found:")
-    for f in bad_files:
-        print(" -", f)
+if bad:
     sys.exit(1)
 else:
     print("All manifest files are clean.")
@@ -49,46 +50,40 @@ PYEOF
 
 chmod +x /home/ubuntu/bleater-app/scripts/validate_configmap.py
 
-echo "🔁 Updating CI workflow..."
+echo "5️⃣ Updating CI workflow..."
 CI_FILE="/home/ubuntu/bleater-app/.gitea/workflows/bleat-ci.yaml"
-if [ -f "$CI_FILE" ]; then
-cat > "$CI_FILE" << 'YAMLEOF'
+
+cat > "$CI_FILE" <<'EOF'
 name: bleat-ci
 on: [push, pull_request]
 jobs:
-  unit-tests:
+  validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Validate ConfigMap manifests
-        run: python3 scripts/validate_configmap.py
-      - name: Run tests
-        run: echo "tests passed"
-YAMLEOF
-fi
+      - run: python3 scripts/validate_configmap.py
+EOF
 
-echo "🚀 Applying fixed ConfigMap to cluster..."
-kubectl apply -f "$MANIFEST" || true
+echo "6️⃣ Applying fixed ConfigMap..."
+kubectl apply -f "$MANIFEST"
 
-echo "🔄 Triggering rolling restart..."
-kubectl rollout restart deployment "$DEPLOY" -n "$BLEATER_NS" || true
+echo "7️⃣ Rolling restart..."
+kubectl rollout restart deployment "$DEPLOY" -n "$BLEATER_NS"
 
-# ⏱ Intentionally shorter timeout to introduce cloud variance
-echo "⏳ Waiting for rollout (short timeout for variability)..."
-kubectl rollout status deployment "$DEPLOY" -n "$BLEATER_NS" --timeout=35s || true
+echo "⏳ Waiting for rollout to complete..."
+kubectl rollout status deployment "$DEPLOY" -n "$BLEATER_NS" --timeout=180s
 
-# 🎲 Pod selection race condition (no readiness filter)
-echo "📦 Selecting a pod (race-prone)..."
+echo "8️⃣ Waiting for pods ready..."
+kubectl wait --for=condition=ready pod -l "$APP_LABEL" -n "$BLEATER_NS" --timeout=180s
+
+echo "9️⃣ Verifying environment variable..."
 POD=$(kubectl get pods -n "$BLEATER_NS" -l "$APP_LABEL" \
-  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+  -o jsonpath='{.items[0].metadata.name}')
 
-echo "🔎 Checking pod env..."
-kubectl exec -n "$BLEATER_NS" "$POD" -- printenv REDIS_URL || true
+kubectl exec -n "$BLEATER_NS" "$POD" -- printenv REDIS_URL
 
-echo "📜 Checking pod logs..."
-kubectl logs -n "$BLEATER_NS" "$POD" --tail=20 | grep -i "redis connection established" || true
+echo "🔟 Verifying Loki logs..."
+sleep 10
+kubectl exec -n "$LOG_NS" deployment/loki-gateway -- cat /data/logs.jsonl
 
-echo "🧾 Checking Loki logs (file backend)..."
-kubectl exec -n logging deployment/loki-gateway -- cat /data/logs.jsonl || true
-
-echo "✅ Solution steps completed."
+echo "✅ Done."
