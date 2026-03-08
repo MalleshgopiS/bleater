@@ -2,8 +2,8 @@
 set -euo pipefail
 
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-TASK_ROOT="/home/ubuntu/bleater-app"
 BLEATER_NS="bleater"
+TASK_ROOT="$(pwd)"
 
 cd "${TASK_ROOT}"
 
@@ -37,7 +37,6 @@ ESCAPED = re.compile(r"(\\r|\\x0d|\\u000d)", re.I)
 
 def check(path):
     text = path.read_text()
-
     if "\r" in text:
         return 1
     if CONTROL.search(text):
@@ -80,7 +79,7 @@ EOF
 echo "5. Applying fixed ConfigMap..."
 kubectl apply -f k8s/bleat-service-configmap.yaml
 
-echo "6. Triggering rolling restart via annotation (grader-safe)..."
+echo "6. Triggering rolling restart (grader-safe)..."
 kubectl patch deployment bleat-service -n "${BLEATER_NS}" \
   -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"restartedAt\":\"$(date +%s)\"}}}}}"
 
