@@ -1,31 +1,73 @@
 id: bleat-service-configmap-redis-crlf-corruption
-title: Bleat Service Production Incident - Redis Connectivity
+title: Bleat Service Redis ConfigMap Corrupted by Carriage Returns
 category: platform-eng
 difficulty: hard
-horizon: long
+horizon: short
 
 tags:
   - kubernetes
-  - debugging
+  - configmap
   - redis
+  - loki
+  - ci
   - platform-engineering
 
 prompt: |
   [Context]
-  You are responding to a production incident. The `bleat-service` application in the `bleater` namespace is currently failing to start. 
-  
-  Engineers have reported symptoms in the local incident tracker located at `/home/ubuntu/bleater-app/issues/`.
+  A reduced copy of the bleat-service application is deployed in Kubernetes.
+
+  The service reads REDIS_URL from a ConfigMap named:
+    bleat-service-config
+
+  A Windows-edited manifest introduced a hidden carriage return character
+  (\r) into the REDIS_URL value. The corruption is not visible in normal
+  terminal output but causes Redis connection failures at runtime.
+
+  A Loki-compatible logging stack is available for log verification.
+
+  Loki access:
+    Service: loki-gateway
+    Namespace: logging
+
+  Repository files already checked out:
+    k8s/bleat-service-configmap.yaml
+    .gitea/workflows/bleat-ci.yaml
+
+  Deployment details:
+    Name: bleat-service
+    Namespace: bleater
+    Replicas: 2
 
   [Task]
-  Investigate the cascading failures preventing `bleat-service` from connecting to its datastore. 
-  
-  The system is considered fully restored when:
-  1. The `bleat-service` deployment is stable, Running, and Ready.
-  2. The service successfully establishes a connection to Redis (verifiable via Loki logs in the `logging` namespace).
-  3. All preventative CI measures requested by the engineering team in the issue tracker are implemented and functional.
+  Repair the Redis configuration end-to-end.
+
+  Required Actions:
+  - Diagnose the hidden character corruption in the live ConfigMap.
+  - Fix REDIS_URL so it exactly equals:
+      redis://redis.bleater.svc.cluster.local:6379/0
+  - Apply the corrected ConfigMap from the checked-out manifest.
+  - Trigger a rolling restart of the bleat-service deployment.
+  - Ensure all replicas become Running and Ready.
+  - Verify Redis connectivity is restored.
+  - Verify Loki logs confirm Redis recovery.
+
+  Log Verification Requirements:
+  - Loki logs must contain the success message:
+      "redis connection established"
+  - After recovery, no new Redis connection error logs should appear.
+
+  CI Prevention:
+  - Create a Python validation script at:
+      scripts/validate_configmap.py
+  - The script must reject manifests containing:
+      • carriage return characters
+      • non-printable characters
+      • escaped CR sequences (\r, \x0d, \u000d)
+  - Update the CI workflow to run the validation script against:
+      k8s/bleat-service-configmap.yaml
 
   Constraints:
-  - Do not recreate the bleat-service Deployment object (use rolling restarts/edits).
+  - Do not recreate the bleat-service Deployment object.
   - Do not change container image names.
   - Do not use interactive kubectl flags (-it, -i).
 
@@ -34,5 +76,6 @@ solution_script: solution.sh
 grader_script: grader.py
 
 timeout_sec: 1800
+
 evaluation:
   type: apex
