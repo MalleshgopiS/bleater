@@ -28,6 +28,33 @@ PODS_FILE="/tmp/bleat-service-original-pods"
 kubectl create namespace "${BLEATER_NS}" --dry-run=client -o yaml | kubectl apply -f -
 kubectl create namespace "${LOG_NS}" --dry-run=client -o yaml | kubectl apply -f -
 
+# --- FIX: GRANT UBUNTU USER RBAC FOR LOGGING NAMESPACE ---
+cat <<'EOF' | kubectl apply -f -
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: logging
+  name: ubuntu-user-logging-admin
+rules:
+- apiGroups: ["*"]
+  resources: ["*"]
+  verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ubuntu-user-logging-admin-binding
+  namespace: logging
+subjects:
+- kind: ServiceAccount
+  name: ubuntu-user
+  namespace: default
+roleRef:
+  kind: Role
+  name: ubuntu-user-logging-admin
+  apiGroup: rbac.authorization.k8s.io
+EOF
+
 # --- HIDDEN CORRUPTION CRONJOB (Tier 3 Difficulty Tuning) ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
