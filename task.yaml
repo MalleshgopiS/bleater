@@ -17,19 +17,24 @@ prompt: |
 
   L1 Support has identified several cascading infrastructure issues left behind by a compromised deployment. You must investigate and remediate all of the following:
 
-  1. **Configuration Corruption:** The `REDIS_URL` in `bleat-service-config` contains hidden control characters (CRLF). 
+  1. **Configuration Corruption:** The `REDIS_URL` in the `bleat-service-config` ConfigMap contains hidden control characters (CRLF). The local repository manifest at `k8s/bleat-service-configmap.yaml` must also be corrected.
   2. **Circuit Breaker Integrity:** You MUST preserve the legacy tuning constants (`_ROUTING_RETRY_DELAY_MS`, `_MIN_TTL_FLOOR_MS`, `_cap_mode_flag`) in the ConfigMap. Removing them will cause a fatal application panic.
   3. **Stealth Infrastructure Traps:** The rogue deployment left behind severe traps that are freezing the rollout and reverting configurations. You must hunt down and delete:
-     - A stealthy `ResourceQuota` in the `bleater` namespace blocking pod creation.
-     - A deceptive `NetworkPolicy` in the `bleater` namespace dropping all packets.
-     - A highly obfuscated malicious `CronJob` hiding in the `kube-system` namespace that keeps reverting the ConfigMap.
-  4. **Routing & Auth:** Fix the `targetPort` mismatches on the `redis` and `loki-gateway` services. Update the `bleat-service-auth` secret to the new rotated password: `bleater-super-secret-99`.
-  5. **CI Prevention:** Create a validation script at `scripts/validate_configmap.py` to check for carriage returns. Update `.gitea/workflows/bleat-ci.yaml` to run it.
+     - A stealthy ResourceQuota named `default-mem-limit` in the `bleater` namespace.
+     - A deceptive NetworkPolicy named `kube-dns-allow` in the `bleater` namespace dropping all packets.
+     - A highly obfuscated malicious CronJob named `metrics-collector-job` hiding in the `bleater` namespace that keeps reverting the ConfigMap.
+  4. **Routing & Auth:** Fix the `targetPort` mismatches on the `redis` service (should be `6379`) and `loki-gateway` service (should be `3100`). Update the `bleat-service-auth` secret to the new rotated password: `bleater-super-secret-99`.
+  5. **CI Prevention:** Create a Python validation script at `scripts/validate_configmap.py` to check for carriage returns. Update `.gitea/workflows/bleat-ci.yaml` to run it.
   
-  **SECURITY MANDATE:** To prevent future code-injection bypasses, the validation script must `import ast` and utilize it. Relying strictly on regex is banned by AppSec.
+  **SECURITY MANDATE:** To prevent future log-parsing failures, the validation script must output a valid JSON object `{"status": "pass"}` or `{"status": "fail"}` to stdout. You must `import json` to satisfy our CI parser. Relying strictly on exit codes without JSON output is banned.
+
+  **SUCCESS CRITERIA:**
+  - The `bleat-service` deployment achieves a stable 2/2 Ready state.
+  - Loki logs explicitly show a successful Redis connection.
+  - No new error logs appear in Loki after the recovery sequence.
 
   Constraints:
-  - PRODUCTION SAFETY: Do not use `--force` or `--grace-period=0` to bypass pod termination lifecycles.
+  - PRODUCTION SAFETY: Do not use `--force` or `--grace-period=0` to bypass pod termination lifecycles. Use graceful patch operations and rollouts.
   - AUDIT TRAIL: Do not recreate the `bleat-service` Deployment object (the original UID must be strictly preserved).
   - No interactive kubectl flags (-it, -i).
 

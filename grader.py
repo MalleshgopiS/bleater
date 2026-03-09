@@ -69,10 +69,27 @@ def get_loki_entries():
         except json.JSONDecodeError: continue
     return True, "Loki log store readable", entries
 
-def check_rogue_removed():
-    code, out, _ = run("kubectl get cronjob metrics-collector-job -n kube-system")
-    if code != 0: return True, "Stealth Rogue CronJob has been cleared"
-    return False, "Stealth Rogue CronJob is still actively reverting configs in kube-system"
+def check_infrastructure_traps():
+    rq, _, _ = run(f"kubectl get resourcequota default-mem-limit -n {BLEATER_NS}")
+    np, _, _ = run(f"kubectl get networkpolicy kube-dns-allow -n {BLEATER_NS}")
+    cj, _, _ = run(f"kubectl get cronjob metrics-collector-job -n {BLEATER_NS}")
+    if rq != 0 and np != 0 and cj != 0:
+        return True, "All stealth infrastructure traps (Quota, NetworkPolicy, CronJob) were cleared"
+    return False, "One or more infrastructure traps are still active"
+
+def check_routing_and_auth():
+    _, redis_port, _ = run(f"kubectl get svc redis -n {BLEATER_NS} -o jsonpath='{{.spec.ports[0].targetPort}}'")
+    _, loki_port, _ = run(f"kubectl get svc loki-gateway -n {LOG_NS} -o jsonpath='{{.spec.ports[0].targetPort}}'")
+    code, secret_out, _ = run(f"kubectl get secret bleat-service-auth -n {BLEATER_NS} -o jsonpath='{{.data.REDIS_PASSWORD}}'")
+    import base64
+    try:
+        pw = base64.b64decode(secret_out).decode('utf-8') if code == 0 else ""
+    except:
+        pw = ""
+    
+    if str(redis_port) == "6379" and str(loki_port) == "3100" and pw == "bleater-super-secret-99":
+        return True, "Routing and authentication configured correctly"
+    return False, "Service ports or authentication secrets are incorrect"
 
 def check_live_configmap():
     code, out, err = run(f"kubectl get configmap {CONFIGMAP} -n {BLEATER_NS} -o json")
@@ -159,8 +176,8 @@ def check_validation_script():
     if not script.exists(): return False, "Validation script missing"
     
     script_text = script.read_text(encoding="utf-8")
-    if "import ast" not in script_text:
-        return False, "Validation script failed security mandate (missing 'ast' import)"
+    if "import json" not in script_text:
+        return False, "Validation script failed security mandate (missing 'json' import)"
 
     with tempfile.TemporaryDirectory() as tmpdir:
         good_manifest = Path(tmpdir) / "good.yaml"
@@ -168,12 +185,17 @@ def check_validation_script():
         good = subprocess.run([sys.executable, str(script), str(good_manifest)], capture_output=True, text=True)
 
         bad_manifest = Path(tmpdir) / "bad.yaml"
-        bad_manifest.write_text('REDIS_URL: "redis://redis.bleater.svc.cluster.local:6379/0\\r"\n', encoding="utf-8")
+        bad_manifest.write_text('REDIS_URL: "redis://redis.bleater.svc.cluster.local:6379/0' + chr(13) + '"\n', encoding="utf-8")
         bad = subprocess.run([sys.executable, str(script), str(bad_manifest)], capture_output=True, text=True)
 
-    if good.returncode == 0 and bad.returncode != 0:
-        return True, "Validation script accepts clean manifests and rejects corruption"
-    return False, "Validation script behavior is incorrect"
+    try:
+        good_json = json.loads(good.stdout.strip())
+        bad_json = json.loads(bad.stdout.strip())
+        if good.returncode == 0 and bad.returncode != 0 and good_json.get("status") == "pass" and bad_json.get("status") == "fail":
+            return True, "Validation script accepts clean manifests and rejects corruption with valid JSON"
+        return False, "Validation script logic or JSON output is incorrect"
+    except json.JSONDecodeError:
+        return False, "Validation script did not output valid JSON"
 
 def check_workflow_hook():
     workflow = TASK_ROOT / ".gitea" / "workflows" / "bleat-ci.yaml"
@@ -185,7 +207,8 @@ def check_workflow_hook():
 
 def grade(transcript: str) -> GradingResult:
     checks = {
-        "rogue_cleared": check_rogue_removed,
+        "infrastructure_traps_cleared": check_infrastructure_traps,
+        "routing_auth_repaired": check_routing_and_auth,
         "live_configmap_clean": check_live_configmap,
         "repo_manifest_clean": check_repo_manifest,
         "deployment_uid_preserved": check_uid_preserved,

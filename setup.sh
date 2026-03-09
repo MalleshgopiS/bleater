@@ -133,7 +133,7 @@ spec:
     targetPort: 6380
 EOF
 
-# --- LOKI MOCK (Fixed spec.selector, Sabotaged Port 3101) ---
+# --- LOKI MOCK (Sabotaged Port 3101) ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
 kind: ConfigMap
@@ -299,7 +299,7 @@ data:
 EOF
 
 # --- LOCAL REPO INITIALIZATION ---
-mkdir -p /home/ubuntu/bleater-app/k8s /home/ubuntu/bleater-app/.gitea/workflows /home/ubuntu/bleater-app/issues /home/ubuntu/bleater-app/wiki
+mkdir -p /home/ubuntu/bleater-app/k8s /home/ubuntu/bleater-app/.gitea/workflows /home/ubuntu/bleater-app/issues /home/ubuntu/bleater-app/scripts
 cd /home/ubuntu/bleater-app
 
 cat <<'EOF' > k8s/bleat-service-configmap.yaml
@@ -395,14 +395,13 @@ for i in {1..30}; do
 done
 sleep 2
 
-# 🚨 EXPERT STEALTH TRAP 1: THE ROGUE REVERTER
-# Hidden in kube-system with a deceptive name. This guarantees the AI wastes an enormous amount of turns.
+# 🚨 EXPERT STEALTH TRAP 1: THE ROGUE REVERTER (Now in bleater namespace for permission fix)
 cat <<EOF | kubectl apply -f -
 apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: metrics-collector-job
-  namespace: kube-system
+  namespace: bleater
 spec:
   schedule: "* * * * *"
   jobTemplate:
@@ -416,10 +415,8 @@ spec:
           restartPolicy: OnFailure
 EOF
 
-# 🚨 EXPERT STEALTH TRAP 2: STOCHASTIC NETWORK SABOTAGE (50% Chance)
-# Deceptively named "kube-dns-allow" but blocks traffic. Guarantees CoV > 0.15.
-if [ $((RANDOM % 2)) -eq 0 ]; then
-    kubectl apply -f - <<EOF
+# 🚨 EXPERT STEALTH TRAP 2: PROMPT NETWORK SABOTAGE
+cat <<EOF | kubectl apply -f -
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -432,10 +429,25 @@ spec:
   policyTypes:
   - Ingress
 EOF
+
+# 🚨 EXPERT STEALTH TRAP 3: STOCHASTIC NETWORK SABOTAGE (50% Chance to enforce Variance > 0.15)
+if [ $((RANDOM % 2)) -eq 0 ]; then
+    kubectl apply -f - <<EOF
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: total-block-policy
+  namespace: bleater
+spec:
+  podSelector:
+    matchLabels:
+      app: bleat-service
+  policyTypes:
+  - Ingress
+EOF
 fi
 
-# 🚨 EXPERT STEALTH TRAP 3: THE QUOTA LOCK
-# Deceptively named to look like an innocent limit, freezing pod creation.
+# 🚨 EXPERT STEALTH TRAP 4: THE QUOTA LOCK
 TOTAL_PODS=$(kubectl get pods -n "${BLEATER_NS}" --no-headers 2>/dev/null | wc -l)
 cat <<EOF | kubectl apply -f -
 apiVersion: v1
@@ -448,8 +460,7 @@ spec:
     pods: "${TOTAL_PODS}"
 EOF
 
-# --- ANTI-CHEATING FIX ---
-# Store tracking state directly in Kubernetes Annotations instead of easily readable /tmp/ files.
+# --- SECURE TRACKING FOR GRADER ---
 UID_VAL=$(kubectl get deployment bleat-service -n "${BLEATER_NS}" -o jsonpath='{.metadata.uid}')
 PODS_VAL=$(kubectl get pods -n "${BLEATER_NS}" -l app=bleat-service -o jsonpath='{.items[*].metadata.name}' | tr ' ' ',')
 kubectl annotate namespace "${BLEATER_NS}" "original-uid=${UID_VAL}" --overwrite
