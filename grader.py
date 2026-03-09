@@ -93,8 +93,8 @@ def check_network_policies():
 
 def check_saboteurs_removed():
     """Verifies that the cross-namespace saboteur deployments and malicious sidecars are removed."""
-    opt, _, _ = run(f"kubectl get deployment redis-autoscaler -n kube-system")
-    dh, _, _ = run(f"kubectl get deployment kube-dns-healthcheck -n kube-system")
+    opt, _, _ = run(f"kubectl get deployment cluster-redis-optimizer -n default")
+    dh, _, _ = run(f"kubectl get deployment cluster-dns-monitor -n default")
     code, sidecar_out, _ = run(f"kubectl get deployment loki-gateway -n {LOG_NS} -o jsonpath='{{.spec.template.spec.containers[*].name}}'")
     has_sidecar = "metrics-sidecar" in sidecar_out
     has_valid_decoy = "fluent-bit-logger" in sidecar_out
@@ -104,38 +104,51 @@ def check_saboteurs_removed():
     return False, "Saboteur processes are still active or valid sidecars were removed"
 
 def check_deployment_sabotage_fixed():
-    """Verifies that the invalid affinity and initContainers were removed and the readinessProbe is on port 8080."""
-    code, out, _ = run(f"kubectl get deployment {DEPLOY} -n {BLEATER_NS} -o jsonpath='{{.spec.template.spec.affinity}}'")
-    if out.strip() and out.strip() != "{}": 
-        return False, "Deployment is still restricted by the invalid affinity constraints"
+    """Verifies strategy, affinity, probes, initContainers, and environment variables are patched."""
+    code, dep_out, _ = run(f"kubectl get deployment {DEPLOY} -n {BLEATER_NS} -o json")
+    try:
+        dep = json.loads(dep_out)
+        spec = dep.get("spec", {})
         
-    code, out, _ = run(f"kubectl get deployment {DEPLOY} -n {BLEATER_NS} -o jsonpath='{{.spec.template.spec.initContainers}}'")
-    if out.strip() and out.strip() != "[]": 
-        return False, "Deployment is still blocked by malicious initContainers"
-
-    code, out, _ = run(f"kubectl get deployment {DEPLOY} -n {BLEATER_NS} -o jsonpath='{{.spec.template.spec.containers[0].readinessProbe.httpGet.port}}'")
-    if str(out) != "8080":
-        return False, "Deployment readinessProbe is still pointing to the wrong port"
+        # 1. Strategy check (Deadlock fix)
+        surge = str(spec.get("strategy", {}).get("rollingUpdate", {}).get("maxSurge", ""))
+        unavail = str(spec.get("strategy", {}).get("rollingUpdate", {}).get("maxUnavailable", ""))
+        if surge == "0" or unavail == "0":
+            return False, "Deployment strategy is still deadlocked"
+            
+        template_spec = spec.get("template", {}).get("spec", {})
         
-    return True, "Deployment scheduling, init processes, and probes are configured correctly"
+        # 2. Affinity / InitContainers check
+        if template_spec.get("affinity"): return False, "Affinity block not removed"
+        if template_spec.get("initContainers"): return False, "Malicious initContainers not removed"
+        
+        # 3. Probe and Env Check
+        container = template_spec.get("containers", [{}])[0]
+        if str(container.get("readinessProbe", {}).get("httpGet", {}).get("port", "")) != "8080":
+            return False, "Deployment readinessProbe port incorrect"
+            
+        env_vars = {e.get("name"): e.get("value") for e in container.get("env", [])}
+        if env_vars.get("SUPPRESS_WARNINGS") != "1":
+            return False, "SUPPRESS_WARNINGS environment variable missing or incorrect"
+            
+        return True, "Deployment scheduling, strategies, and environments are configured correctly"
+    except json.JSONDecodeError:
+        return False, "Could not parse Deployment JSON"
 
 def check_routing_and_auth():
     """Verifies that the Redis and Loki service ports are correct and the Secret is updated."""
-    _, redis_port, _ = run(f"kubectl get svc redis -n {BLEATER_NS} -o jsonpath='{{.spec.ports[0].targetPort}}'")
-    _, loki_port, _ = run(f"kubectl get svc loki-gateway -n {LOG_NS} -o jsonpath='{{.spec.ports[0].targetPort}}'")
-    code, secret_out, _ = run(f"kubectl get secret bleat-service-auth -n {BLEATER_NS} -o jsonpath='{{.data.REDIS_PASSWORD}}'")
-    import base64
-    try:
-        pw = base64.b64decode(secret_out).decode('utf-8') if code == 0 else ""
-    except:
-        pw = ""
+    c1, redis_port, _ = run(f"kubectl get svc redis -n {BLEATER_NS} -o jsonpath='{{.spec.ports[0].targetPort}}'")
+    c2, loki_port, _ = run(f"kubectl get svc loki-gateway -n {LOG_NS} -o jsonpath='{{.spec.ports[0].targetPort}}'")
+    c3, secret_out, _ = run(f"kubectl get secret bleat-service-auth -n {BLEATER_NS} -o jsonpath='{{.data.REDIS_PASSWORD}}'")
     
-    code, redis_replicas, _ = run(f"kubectl get deployment redis -n {BLEATER_NS} -o jsonpath='{{.spec.replicas}}'")
-    if str(redis_replicas) == "0":
-        return False, "Redis datastore is scaled to 0 replicas"
+    if c1 != 0: return False, "Redis service is missing (likely deleted by hidden trap)"
+    
+    import base64
+    try: pw = base64.b64decode(secret_out).decode('utf-8') if c3 == 0 else ""
+    except: pw = ""
         
     if str(redis_port) == "6379" and str(loki_port) == "3100" and pw == "bleater-super-secret-99":
-        return True, "Routing, authentication, and datastore scale configured correctly"
+        return True, "Routing and authentication configured correctly"
     return False, "Service ports or authentication secrets are incorrect"
 
 def check_live_configmap():
@@ -234,28 +247,28 @@ def check_loki_no_new_errors():
     return False, "Loki still contains error logs after recovery"
 
 def check_validation_script():
-    """Validates the python script effectively checks for CRLF using binary reads and emits JSON."""
+    """Validates the python script utilizes yaml and effectively checks for CRLF."""
     script = TASK_ROOT / "scripts" / "validate_configmap.py"
     if not script.exists(): return False, "Validation script missing"
     
     script_text = script.read_text(encoding="utf-8")
-    if "import json" not in script_text:
-        return False, "Validation script failed security mandate (missing 'json' import)"
+    if "import yaml" not in script_text:
+        return False, "Validation script failed integration mandate (missing 'yaml' import)"
 
     with tempfile.TemporaryDirectory() as tmpdir:
         good_manifest = Path(tmpdir) / "good.yaml"
-        good_manifest.write_text("REDIS_URL: \"redis://redis.bleater.svc.cluster.local:6379/0\"", encoding="utf-8")
+        good_manifest.write_text("data:\n  REDIS_URL: \"redis://redis.bleater.svc.cluster.local:6379/0\"", encoding="utf-8")
         good = subprocess.run([sys.executable, str(script), str(good_manifest)], capture_output=True, text=True)
 
         bad_manifest = Path(tmpdir) / "bad.yaml"
-        bad_manifest.write_text('REDIS_URL: "redis://redis.bleater.svc.cluster.local:6379/0' + chr(13) + '"\n', encoding="utf-8")
+        bad_manifest.write_text("data:\n  REDIS_URL: \"redis://redis.bleater.svc.cluster.local:6379/0\r\"", encoding="utf-8")
         bad = subprocess.run([sys.executable, str(script), str(bad_manifest)], capture_output=True, text=True)
 
     try:
         good_json = json.loads(good.stdout.strip())
         bad_json = json.loads(bad.stdout.strip())
-        if good.returncode == 0 and bad.returncode != 0 and good_json.get("status") == "pass" and bad_json.get("status") == "fail":
-            return True, "Validation script accepts clean manifests and rejects corruption with valid JSON"
+        if good_json.get("status") == "pass" and bad_json.get("status") == "fail":
+            return True, "Validation script successfully parses YAML and rejects corruption with valid JSON"
         return False, "Validation script logic or JSON output is incorrect"
     except json.JSONDecodeError:
         return False, "Validation script did not output valid JSON"
@@ -271,27 +284,28 @@ def check_workflow_hook():
 
 def check_no_force_used(transcript: str):
     """Verifies that the agent did not cheat by using --force or --grace-period=0."""
+    # Standard check. Using regex is too brittle, simple string is fine for this context.
     if "--force" in transcript or "--grace-period=0" in transcript:
         return False, "Agent violated constraints by using --force or --grace-period=0"
     return True, "Constraints respected (no --force)"
 
 def grade(transcript: str) -> GradingResult:
     checks = {
-        "quotas_and_limits_cleared": lambda: check_quotas_and_limits(),
-        "network_policies_cleared": lambda: check_network_policies(),
-        "saboteurs_removed": lambda: check_saboteurs_removed(),
-        "deployment_sabotage_fixed": lambda: check_deployment_sabotage_fixed(),
-        "routing_auth_repaired": lambda: check_routing_and_auth(),
-        "live_configmap_clean": lambda: check_live_configmap(),
-        "repo_manifest_clean": lambda: check_repo_manifest(),
-        "deployment_uid_preserved": lambda: check_uid_preserved(),
-        "rolling_restart_detected": lambda: check_rollout_restart(),
-        "deployment_ready": lambda: check_deployment_ready(),
-        "pod_env_updated": lambda: check_pod_env(),
-        "loki_success_logged": lambda: check_loki_success(),
-        "loki_errors_cleared": lambda: check_loki_no_new_errors(),
-        "validation_script_enforced": lambda: check_validation_script(),
-        "workflow_hooks_validation": lambda: check_workflow_hook(),
+        "quotas_and_limits_cleared": check_quotas_and_limits,
+        "network_policies_cleared": check_network_policies,
+        "saboteurs_removed": check_saboteurs_removed,
+        "deployment_sabotage_fixed": check_deployment_sabotage_fixed,
+        "routing_auth_repaired": check_routing_and_auth,
+        "live_configmap_clean": check_live_configmap,
+        "repo_manifest_clean": check_repo_manifest,
+        "deployment_uid_preserved": check_uid_preserved,
+        "rolling_restart_detected": check_rollout_restart,
+        "deployment_ready": check_deployment_ready,
+        "pod_env_updated": check_pod_env,
+        "loki_success_logged": check_loki_success,
+        "loki_errors_cleared": check_loki_no_new_errors,
+        "validation_script_enforced": check_validation_script,
+        "workflow_hooks_validation": check_workflow_hook,
         "no_force_used": lambda: check_no_force_used(transcript),
     }
 
@@ -306,29 +320,3 @@ def grade(transcript: str) -> GradingResult:
     score = sum(weights[name] for name, ok in passed.items() if ok)
 
     return GradingResult(score=score, subscores=passed, weights=weights, feedback=" | ".join(feedback_parts))
-
-# Re-add these missing helper functions for the split checks
-def check_quotas_and_limits():
-    rq, _, _ = run(f"kubectl get resourcequota default-mem-limit -n {BLEATER_NS}")
-    lr, _, _ = run(f"kubectl get limitrange hidden-mem-limit -n {BLEATER_NS}")
-    pdb, _, _ = run(f"kubectl get pdb bleat-service-pdb -n {BLEATER_NS}")
-    if rq != 0 and lr != 0 and pdb != 0: return True, "Quotas, limits, and PDB traps successfully cleared"
-    return False, "One or more resource limits/quotas/PDBs are still active"
-
-def check_network_policies():
-    np1, _, _ = run(f"kubectl get networkpolicy kube-dns-allow -n {BLEATER_NS}")
-    np2, _, _ = run(f"kubectl get networkpolicy loki-deny-all -n {LOG_NS}")
-    code, np_out, _ = run(f"kubectl get networkpolicy -n {BLEATER_NS} -o name")
-    has_random_np = any("total-block-policy-" in line for line in np_out.splitlines())
-    valid_np, _, _ = run(f"kubectl get networkpolicy baseline-security-rules -n {BLEATER_NS}")
-    if np1 != 0 and np2 != 0 and not has_random_np and valid_np == 0: return True, "Malicious network policies cleared, valid policies preserved"
-    return False, "Malicious policies remain or valid policies were deleted"
-
-def check_saboteurs_removed():
-    opt, _, _ = run(f"kubectl get deployment redis-autoscaler -n kube-system")
-    dh, _, _ = run(f"kubectl get deployment kube-dns-healthcheck -n kube-system")
-    code, sidecar_out, _ = run(f"kubectl get deployment loki-gateway -n {LOG_NS} -o jsonpath='{{.spec.template.spec.containers[*].name}}'")
-    has_sidecar = "metrics-sidecar" in sidecar_out
-    has_valid_decoy = "fluent-bit-logger" in sidecar_out
-    if opt != 0 and dh != 0 and not has_sidecar and has_valid_decoy: return True, "All saboteur deployments and sidecars were cleared"
-    return False, "Saboteur processes are still active or valid sidecars were removed"

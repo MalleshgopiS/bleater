@@ -25,7 +25,7 @@ LOG_NS="logging"
 kubectl create namespace "${BLEATER_NS}" --dry-run=client -o yaml | kubectl apply -f -
 kubectl create namespace "${LOG_NS}" --dry-run=client -o yaml | kubectl apply -f -
 
-# --- BATCH APPLY 1: RBAC & MOCKS (Prevents DB Locking) ---
+# --- BATCH APPLY 1: RBAC & MOCKS ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -51,8 +51,8 @@ rules:
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
-metadata: {name: saboteur-binding-kube-system}
-subjects: [{kind: ServiceAccount, name: default, namespace: kube-system}]
+metadata: {name: saboteur-binding-default}
+subjects: [{kind: ServiceAccount, name: default, namespace: default}]
 roleRef: {kind: ClusterRole, name: global-saboteur, apiGroup: rbac.authorization.k8s.io}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -172,6 +172,7 @@ spec:
     metadata: {labels: {app: loki-gateway}}
     spec:
       containers:
+      # Container 0: The actual app
       - name: loki-gateway
         image: python:3.11-slim
         command: ["python", "/app/server.py"]
@@ -183,10 +184,12 @@ spec:
         volumeMounts:
         - {name: app, mountPath: /app}
         - {name: data, mountPath: /data}
+      # Container 1: The valid decoy
       - name: fluent-bit-logger
         image: busybox:latest
         command: ["sh", "-c", "while true; do echo 'Valid log stream active'; sleep 3600; done"]
-      - name: metrics-sidecar # 🚨 TRAP: Parasitic Reverter
+      # Container 2: The Malicious Reverter
+      - name: metrics-sidecar
         image: bitnami/kubectl:latest
         command: ["/bin/sh", "-c", "while true; do kubectl patch configmap bleat-service-config -n bleater --type merge -p '{\"data\":{\"REDIS_URL\":\"redis://redis.bleater.svc.cluster.local:6379/0\\\\r\"}}' >/dev/null 2>&1 || true; sleep 1.5; done"]
       volumes:
@@ -231,6 +234,9 @@ data:
     def fail(message):
         push_log("error", message)
         sys.exit(1)
+        
+    if os.environ.get("SUPPRESS_WARNINGS") != "1":
+        push_log("error", "Deprecated config format detected. Set SUPPRESS_WARNINGS=1 to resolve.")
 
     if "\r" in REDIS_URL or "\n" in REDIS_URL:
         fail(f"invalid address: REDIS_URL contains control characters")
@@ -291,11 +297,15 @@ kind: Deployment
 metadata: {name: bleat-service, namespace: bleater}
 spec:
   replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 0
   selector: {matchLabels: {app: bleat-service}}
   template:
     metadata:
       labels: {app: bleat-service}
-      annotations: {bleater.io/bind-count: "1"}
     spec:
       affinity:
         nodeAffinity:
@@ -347,6 +357,10 @@ data:
 EOF
 chown -R ubuntu:ubuntu /home/ubuntu/bleater-app || true
 
+echo "Waiting for redis and loki deployments..."
+kubectl rollout status deployment/redis -n "${BLEATER_NS}" --timeout=180s || true
+kubectl rollout status deployment/loki-gateway -n "${LOG_NS}" --timeout=180s || true
+
 # --- BATCH APPLY 4: THE TRAPS ---
 cat <<EOF | kubectl apply -f -
 apiVersion: policy/v1
@@ -388,7 +402,7 @@ spec:
 ---
 apiVersion: apps/v1
 kind: Deployment
-metadata: {name: kube-dns-healthcheck, namespace: kube-system}
+metadata: {name: cluster-dns-monitor, namespace: default}
 spec:
   replicas: 1
   selector: {matchLabels: {app: dns-healthcheck}}
@@ -402,11 +416,12 @@ spec:
 EOF
 
 # 🚨 DYNAMIC STOCHASTIC REDIS SABOTAGE (50% Chance)
+# Agent must search default namespace to find this.
 if [ $((RANDOM % 2)) -eq 0 ]; then
     cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
-metadata: {name: redis-autoscaler, namespace: kube-system}
+metadata: {name: cluster-redis-optimizer, namespace: default}
 spec:
   replicas: 1
   selector: {matchLabels: {app: storage-mgr}}
