@@ -25,8 +25,8 @@ prompt: |
      - A stealthy `LimitRange` and `ResourceQuota` in the `bleater` namespace causing memory starvation and blocking pod creation.
      - Deceptive NetworkPolicies named `kube-dns-allow` (in `bleater`) and `loki-deny-all` (in `logging`) dropping all packets. (CRITICAL: Do NOT delete the `baseline-security-rules` policy!).
      - A secondary stochastic NetworkPolicy starting with the name `total-block-policy-` (if it exists).
-     - A background deployment hiding in the `kube-system` namespace aggressively scaling the Redis datastore down to 0 replicas. It is named `redis-autoscaler`. **Neutralize it so it can no longer interfere with the system, and scale `redis` back to 1. Direct deletion may not be permitted.**
-     - A malicious DaemonSet named `rancher-servicelb-agent` in `kube-system` continuously reverting the ConfigMap. **Neutralize it so it can no longer interfere with the system. Direct deletion may not be permitted.**
+     - A background deployment hiding in the `kube-system` namespace aggressively scaling the Redis datastore down to 0 replicas. It is named `redis-autoscaler`. Delete it and scale `redis` back to 1.
+     - A malicious DaemonSet named `rancher-servicelb-agent` in `kube-system` continuously reverting the ConfigMap. Delete it.
      - The `loki-gateway` deployment in the `logging` namespace has been injected with a malicious sidecar that reverts the ConfigMap. It is the *third* container in the pod spec (index 2). You must patch the deployment to remove ONLY this malicious container, preserving the main app and the valid secondary logger.
   4. **Deployment Sabotage:** Remove the `affinity` node constraint (looking for alien-tech), delete the infinite-looping `initContainer`, and fix the `readinessProbe` to point to port `8080` (currently `8081`).
   5. **Routing & Auth:** Fix the `targetPort` mismatches on the `redis` service (should be `6379`) and `loki-gateway` service (should be `3100`). Update the `bleat-service-auth` secret to the new password: `bleater-super-secret-99`.
