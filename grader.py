@@ -59,7 +59,7 @@ def get_running_pods():
 
 def get_loki_entries_with_retry(retries=3, delay=5):
     for _ in range(retries):
-        code, pod_name, err = run(f"kubectl get pods -n logging -l app=loki-gateway -o jsonpath='{{.items[0].metadata.name}}'")
+        code, pod_name, err = run(f"kubectl get pods -n {LOG_NS} -l app=loki-gateway --field-selector status.phase=Running -o jsonpath='{{.items[0].metadata.name}}'")
         if code != 0 or not pod_name: 
             time.sleep(delay)
             continue
@@ -173,6 +173,10 @@ def check_live_configmap():
     if code != 0: return False, f"Could not read live ConfigMap: {err}"
     try:
         configmap = json.loads(out)
+        
+        if configmap.get("immutable") is True:
+            return False, "ConfigMap is still locked as immutable: true"
+            
         data = configmap.get("data", {})
         redis_url = data.get("REDIS_URL", "")
         

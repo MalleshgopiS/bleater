@@ -15,6 +15,7 @@ kubectl delete resourcequota default-mem-limit -n "${BLEATER_NS}" || true
 kubectl delete networkpolicy kube-dns-allow -n "${BLEATER_NS}" || true
 kubectl delete networkpolicy loki-deny-all -n "${LOG_NS}" || true
 
+# Delete saboteurs in default namespace
 kubectl delete deployment cluster-redis-optimizer -n default || true
 kubectl delete deployment cluster-dns-monitor -n default || true
 
@@ -51,15 +52,7 @@ kubectl delete secret bleat-service-auth -n "${BLEATER_NS}" --ignore-not-found |
 kubectl create secret generic bleat-service-auth -n "${BLEATER_NS}" --from-literal=REDIS_PASSWORD=bleater-super-secret-99
 
 echo "4. Fixing the Redis and Loki Service Port Routing..."
-# Recreate redis service in case it was somehow deleted
-cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: Service
-metadata: {name: redis, namespace: bleater}
-spec:
-  selector: {app: redis}
-  ports: [{name: redis, port: 6379, targetPort: 6379}]
-EOF
+kubectl patch service redis -n "${BLEATER_NS}" --type='json' -p='[{"op": "replace", "path": "/spec/ports/0/targetPort", "value": 6379}]' || true
 kubectl patch service loki-gateway -n "${LOG_NS}" -p '{"spec":{"ports":[{"port": 3100, "targetPort": 3100, "name": "http"}]}}' || true
 kubectl scale deployment redis -n "${BLEATER_NS}" --replicas=1 || true
 
@@ -75,13 +68,16 @@ kubectl patch deployment bleat-service -n "${BLEATER_NS}" --type=json -p='[{"op"
 
 echo "6. Wait for final rollouts..."
 kubectl rollout status deployment/loki-gateway -n "${LOG_NS}" --timeout=120s || true
+kubectl rollout restart deployment/bleat-service -n "${BLEATER_NS}"
 kubectl rollout status deployment/bleat-service -n "${BLEATER_NS}" --timeout=150s || true
 
 echo "7. Creating JSON validation script..."
 mkdir -p scripts
 cat <<'EOF' > scripts/validate_configmap.py
 #!/usr/bin/env python3
-import json, sys, yaml
+import json
+import sys
+import yaml
 
 try:
     with open(sys.argv[1], 'rb') as f:

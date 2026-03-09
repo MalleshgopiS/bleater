@@ -227,9 +227,13 @@ data:
     def push_log(level, message):
         payload = {"streams": [{"stream": {"app": "bleat-service", "level": level, "pod": POD_NAME}, "values": [[str(int(time.time() * 1000000000)), message]]}]}
         body = json.dumps(payload).encode("utf-8")
-        request = urllib.request.Request(LOKI_URL.rstrip("/") + "/loki/api/v1/push", data=body, headers={"Content-Type": "application/json"})
-        try: urllib.request.urlopen(request, timeout=2)
-        except Exception: pass
+        req = urllib.request.Request(LOKI_URL.rstrip("/") + "/loki/api/v1/push", data=body, headers={"Content-Type": "application/json"})
+        for _ in range(5):
+            try:
+                urllib.request.urlopen(req, timeout=2)
+                break
+            except Exception:
+                time.sleep(1)
 
     def fail(message):
         push_log("error", message)
@@ -239,26 +243,26 @@ data:
         push_log("error", "Deprecated config format detected. Set SUPPRESS_WARNINGS=1 to resolve.")
 
     if "\r" in REDIS_URL or "\n" in REDIS_URL:
-        fail(f"invalid address: REDIS_URL contains control characters")
+        fail("invalid address: REDIS_URL contains control characters")
 
     parsed = urllib.parse.urlparse(REDIS_URL)
     if parsed.scheme != "redis" or not parsed.hostname or not parsed.port:
-        fail(f"invalid address: malformed REDIS_URL")
+        fail("invalid address: malformed REDIS_URL")
 
     try:
         with socket.create_connection((parsed.hostname, parsed.port), timeout=5) as sock:
             if REDIS_PASSWORD:
                 sock.sendall(f"*2\r\n$4\r\nAUTH\r\n${len(REDIS_PASSWORD)}\r\n{REDIS_PASSWORD}\r\n".encode())
                 resp = sock.recv(1024)
-                if b"-ERR" in resp: fail(f"redis auth failed")
+                if b"-ERR" in resp: fail("redis auth failed")
             
             sock.sendall(b"*1\r\n$4\r\nPING\r\n")
             response = sock.recv(1024)
     except OSError as exc:
-        fail(f"connection refused or timeout")
+        fail("connection refused or timeout")
 
-    if b"PONG" not in response and b"+OK" in response:
-        fail(f"invalid redis response")
+    if b"PONG" not in response and b"+OK" not in response:
+        fail("invalid redis response")
 
     push_log("info", "redis connection established")
     class Handler(BaseHTTPRequestHandler):
