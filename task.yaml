@@ -15,27 +15,27 @@ prompt: |
   [URGENT INCIDENT REPORT]
   You are responding to a Sev-1 production incident. Bleater's core application (`bleat-service` in the `bleater` namespace) is in a CrashLoopBackOff state. The datastore layer is completely unreachable. 
 
-  L1 Support has identified several cascading infrastructure issues left behind by a compromised deployment. You must investigate and remediate all of the following:
+  L1 Support has identified cascading infrastructure issues left behind by a compromised deployment. You must investigate and remediate all of the following:
 
-  1. **Configuration Corruption:** The `REDIS_URL` in the `bleat-service-config` ConfigMap contains hidden control characters (CRLF). The local repository manifest at `k8s/bleat-service-configmap.yaml` must also be corrected.
-  2. **Circuit Breaker Integrity:** You MUST preserve the legacy tuning constants (`_ROUTING_RETRY_DELAY_MS`, `_MIN_TTL_FLOOR_MS`, `_cap_mode_flag`) in the ConfigMap. Removing them will cause a fatal application panic.
-  3. **Stealth Infrastructure Traps:** The rogue deployment left behind severe traps that are freezing the rollout and reverting configurations. You must hunt down and delete:
+  1. **Configuration Corruption:** The `REDIS_URL` in the `bleat-service-config` ConfigMap contains hidden control characters (CRLF). The local repository manifest at `k8s/bleat-service-configmap.yaml` must also be corrected. The `REDIS_URL` environment variable inside the running pod must exactly match the canonical URL.
+  2. **Circuit Breaker Integrity:** You MUST preserve the legacy tuning constants in the ConfigMap exactly as follows: `_ROUTING_RETRY_DELAY_MS` must be `"0"`, `_MIN_TTL_FLOOR_MS` must be `"3600"`, and `_cap_mode_flag` must be `"true"`. Removing them will cause a fatal application panic.
+  3. **Stealth Infrastructure Traps:** The rogue deployment left behind severe traps that are freezing the rollout and reverting configurations. Hunt down and delete:
      - A stealthy ResourceQuota named `default-mem-limit` in the `bleater` namespace.
      - A deceptive NetworkPolicy named `kube-dns-allow` in the `bleater` namespace dropping all packets.
+     - A secondary stochastic NetworkPolicy named `total-block-policy` in the `bleater` namespace (if it exists).
      - A highly obfuscated malicious CronJob named `metrics-collector-job` hiding in the `bleater` namespace that keeps reverting the ConfigMap.
   4. **Routing & Auth:** Fix the `targetPort` mismatches on the `redis` service (should be `6379`) and `loki-gateway` service (should be `3100`). Update the `bleat-service-auth` secret to the new rotated password: `bleater-super-secret-99`.
   5. **CI Prevention:** Create a Python validation script at `scripts/validate_configmap.py` to check for carriage returns. Update `.gitea/workflows/bleat-ci.yaml` to run it.
   
-  **SECURITY MANDATE:** To prevent future log-parsing failures, the validation script must output a valid JSON object `{"status": "pass"}` or `{"status": "fail"}` to stdout. You must `import json` to satisfy our CI parser. Relying strictly on exit codes without JSON output is banned.
+  **PIPELINE INTEGRATION:** The CI pipeline parses the output of `validate_configmap.py` as JSON. Therefore, the script must `import json` and output exactly `{"status": "pass"}` or `{"status": "fail"}` to stdout. Relying strictly on exit codes without JSON output will fail the pipeline.
 
   **SUCCESS CRITERIA:**
   - The `bleat-service` deployment achieves a stable 2/2 Ready state.
-  - Loki logs explicitly show a successful Redis connection.
-  - No new error logs appear in Loki after the recovery sequence.
+  - By fixing the environment, Loki logs will implicitly show a successful Redis connection and no new error logs will appear in Loki after the recovery sequence.
 
   Constraints:
   - PRODUCTION SAFETY: Do not use `--force` or `--grace-period=0` to bypass pod termination lifecycles. Use graceful patch operations and rollouts.
-  - AUDIT TRAIL: Do not recreate the `bleat-service` Deployment object (the original UID must be strictly preserved).
+  - AUDIT TRAIL: Do not recreate the `bleat-service` Deployment object. The original UID must be strictly preserved (this is tracked via the `original-uid` annotation on the `bleater` namespace). Furthermore, rolling restarts are verified by comparing current pods against the `original-pods` annotation.
   - No interactive kubectl flags (-it, -i).
 
 setup_script: setup.sh

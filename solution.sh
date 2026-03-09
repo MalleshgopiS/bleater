@@ -41,13 +41,17 @@ mkdir -p scripts
 cat <<'EOF' > scripts/validate_configmap.py
 #!/usr/bin/env python3
 import json, pathlib, sys
+
 def check(p):
-    t=p.read_text(encoding='utf-8')
-    return "\r" in t
+    # Use read_bytes() to prevent Python from auto-converting \r to \n
+    t = p.read_bytes()
+    return b"\r" in t
+
 rc=0
 for f in sys.argv[1:]:
     p=pathlib.Path(f)
     if not p.exists() or check(p): rc=1
+
 if rc == 0:
     print(json.dumps({"status": "pass"}))
 else:
@@ -65,7 +69,7 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@8ade135a41bc03ea155e62e844d188df1ea18608
       - run: python3 scripts/validate_configmap.py k8s/bleat-service-configmap.yaml
 EOF
 

@@ -299,7 +299,7 @@ data:
 EOF
 
 # --- LOCAL REPO INITIALIZATION ---
-mkdir -p /home/ubuntu/bleater-app/k8s /home/ubuntu/bleater-app/.gitea/workflows /home/ubuntu/bleater-app/issues /home/ubuntu/bleater-app/scripts
+mkdir -p /home/ubuntu/bleater-app/k8s /home/ubuntu/bleater-app/.gitea/workflows /home/ubuntu/bleater-app/scripts
 cd /home/ubuntu/bleater-app
 
 cat <<'EOF' > k8s/bleat-service-configmap.yaml
@@ -395,7 +395,7 @@ for i in {1..30}; do
 done
 sleep 2
 
-# 🚨 EXPERT STEALTH TRAP 1: THE ROGUE REVERTER (Now in bleater namespace for permission fix)
+# 🚨 EXPERT STEALTH TRAP 1: THE ROGUE REVERTER
 cat <<EOF | kubectl apply -f -
 apiVersion: batch/v1
 kind: CronJob
