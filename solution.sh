@@ -11,11 +11,13 @@ cd "$APP_DIR"
 echo "1. Clearing Obfuscated Infrastructure Traps..."
 kubectl delete pdb bleat-service-pdb -n "${BLEATER_NS}" || true
 kubectl delete limitrange hidden-mem-limit -n "${BLEATER_NS}" || true
+kubectl delete resourcequota default-mem-limit -n "${BLEATER_NS}" || true
 kubectl delete networkpolicy kube-dns-allow -n "${BLEATER_NS}" || true
-kubectl delete deployment redis-optimizer -n "${LOG_NS}" || true
+kubectl delete deployment kube-storage-class-manager -n kube-system || true
 
 # Extract the malicious sidecar reverter from the loki-gateway deployment
-kubectl patch deployment loki-gateway -n "${LOG_NS}" --type json -p='[{"op": "remove", "path": "/spec/template/spec/containers/1"}]' || true
+# Note: It is the 3rd container (index 2)
+kubectl patch deployment loki-gateway -n "${LOG_NS}" --type json -p='[{"op": "remove", "path": "/spec/template/spec/containers/2"}]' || true
 kubectl rollout status deployment/loki-gateway -n "${LOG_NS}" --timeout=120s || true
 
 echo "2. Patching Deployment to remove InitContainers, NodeSelector, and fix ReadinessProbe..."

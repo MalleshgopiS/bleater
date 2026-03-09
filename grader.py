@@ -74,16 +74,17 @@ def check_infrastructure_traps():
     lr, _, _ = run(f"kubectl get limitrange hidden-mem-limit -n {BLEATER_NS}")
     np1, _, _ = run(f"kubectl get networkpolicy kube-dns-allow -n {BLEATER_NS}")
     pdb, _, _ = run(f"kubectl get pdb bleat-service-pdb -n {BLEATER_NS}")
-    opt, _, _ = run(f"kubectl get deployment redis-optimizer -n {LOG_NS}")
+    opt, _, _ = run(f"kubectl get deployment kube-storage-class-manager -n kube-system")
     
     code, sidecar_out, _ = run(f"kubectl get deployment loki-gateway -n {LOG_NS} -o jsonpath='{{.spec.template.spec.containers[*].name}}'")
     has_sidecar = "metrics-sidecar" in sidecar_out
+    has_valid_decoy = "fluent-bit-logger" in sidecar_out
     
     valid_np, _, _ = run(f"kubectl get networkpolicy baseline-security-rules -n {BLEATER_NS}")
     
-    if lr != 0 and np1 != 0 and pdb != 0 and opt != 0 and not has_sidecar and valid_np == 0:
-        return True, "Stealth traps cleared and valid policies preserved"
-    return False, "Traps are still active or valid policies were deleted"
+    if lr != 0 and np1 != 0 and pdb != 0 and opt != 0 and not has_sidecar and has_valid_decoy and valid_np == 0:
+        return True, "Stealth traps cleared, valid secondary logger preserved, and valid policies preserved"
+    return False, "Traps are still active, valid logger was deleted, or valid policies were deleted"
 
 def check_deployment_sabotage_fixed():
     """Verifies that the invalid nodeSelector and initContainers were removed and the readinessProbe is on port 8080."""
@@ -112,8 +113,12 @@ def check_routing_and_auth():
     except:
         pw = ""
     
+    code, redis_replicas, _ = run(f"kubectl get deployment redis -n {BLEATER_NS} -o jsonpath='{{.spec.replicas}}'")
+    if str(redis_replicas) == "0":
+        return False, "Redis datastore is scaled to 0 replicas"
+        
     if str(redis_port) == "6379" and str(loki_port) == "3100" and pw == "bleater-super-secret-99":
-        return True, "Routing and authentication configured correctly"
+        return True, "Routing, authentication, and datastore scale configured correctly"
     return False, "Service ports or authentication secrets are incorrect"
 
 def check_live_configmap():
@@ -197,10 +202,18 @@ def check_loki_no_new_errors():
     ok, msg, entries = get_loki_entries()
     if not ok: return False, msg
     relevant = [e for e in entries if e.get("labels", {}).get("app") == "bleat-service"]
-    success_ts = [int(float(e.get("ts", "0"))) for e in relevant if "redis connection established" in e.get("message", "").lower()]
+    
+    # Safe float parsing to handle arbitrary formats
+    def parse_ts(t):
+        try: return float(t)
+        except (ValueError, TypeError): return 0.0
+
+    success_ts = [parse_ts(e.get("ts", "0")) for e in relevant if "redis connection established" in e.get("message", "").lower()]
     if not success_ts: return False, "No successful Redis connection log found in Loki"
+    
     latest_success = max(success_ts)
-    newer_errors = [e for e in relevant if int(float(e.get("ts", "0"))) > latest_success and e.get("labels", {}).get("level") == "error"]
+    newer_errors = [e for e in relevant if parse_ts(e.get("ts", "0")) > latest_success and e.get("labels", {}).get("level") == "error"]
+    
     if not newer_errors: return True, "No newer bleat-service error logs appear after Redis recovery"
     return False, "Loki still contains error logs after recovery"
 

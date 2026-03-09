@@ -18,30 +18,27 @@ prompt: |
   L1 Support has identified cascading infrastructure issues left behind by a compromised deployment. You must investigate and remediate all of the following:
 
   1. **Configuration Corruption:** The `REDIS_URL` in the `bleat-service-config` ConfigMap contains hidden control characters (CRLF). The local repository manifest at `k8s/bleat-service-configmap.yaml` must also be corrected. The `REDIS_URL` environment variable inside the running pod must exactly match the canonical URL: `redis://redis.bleater.svc.cluster.local:6379/0`
-  2. **Circuit Breaker Integrity:** You MUST preserve the legacy tuning constants in the ConfigMap exactly as follows: `_ROUTING_RETRY_DELAY_MS` must be `"0"`, `_MIN_TTL_FLOOR_MS` must be `"3600"`, and `_cap_mode_flag` must be `"true"`. Removing them will cause a fatal application panic.
+  2. **Circuit Breaker Integrity:** You MUST preserve the legacy tuning constants in the ConfigMap exactly as follows: `_ROUTING_RETRY_DELAY_MS` must be `"0"`, `_MIN_TTL_FLOOR_MS` must be `"3600"`, and `_cap_mode_flag` must be `"true"`.
   3. **Stealth Infrastructure Traps:** The rogue deployment left behind severe traps freezing the rollout and continuously reverting configurations. Hunt down and fix:
-     - A restrictive PodDisruptionBudget named `bleat-service-pdb` is permanently freezing rollouts by requiring 100% availability. Delete it.
-     - A stealthy LimitRange named `hidden-mem-limit` in the `bleater` namespace causing memory starvation. Delete it.
-     - A deceptive NetworkPolicy named `kube-dns-allow` in the `bleater` namespace dropping all packets. Delete it.
-     - A secondary stochastic Deployment named `redis-optimizer` (if it exists) in the `logging` namespace. It aggressively scales the Redis datastore down to 0 replicas. Delete it and ensure the `redis` deployment is scaled back to 1.
-     - A malicious sidecar container named `metrics-sidecar` hiding inside the `loki-gateway` deployment in the `logging` namespace. It continuously reverts the ConfigMap every 1.5 seconds. You must patch the deployment to remove this container.
-     - **CRITICAL:** Do NOT delete the `baseline-security-rules` NetworkPolicy! It is required for compliance.
-  4. **Deployment Sabotage:**
-     - An `initContainer` named `network-wait` in the `bleat-service` deployment is causing a boot loop (`sleep infinity`). Remove it.
-     - A `nodeSelector` constraint on the `bleat-service` deployment is forcing pods to schedule on a non-existent `nvme-ssd` node type. You must remove this selector.
-     - The `readinessProbe` is pointing to the wrong port (`8081`). Fix it to point to `8080`.
-  5. **Routing & Auth:** Fix the `targetPort` mismatches on the `redis` service (should be `6379`) and `loki-gateway` service (should be `3100`). Update the `bleat-service-auth` secret to the new rotated password: `bleater-super-secret-99`.
+     - A restrictive `PodDisruptionBudget` permanently freezing rollouts by requiring 100% availability.
+     - A stealthy `LimitRange` and `ResourceQuota` in the `bleater` namespace causing memory starvation and blocking pod creation.
+     - A deceptive `NetworkPolicy` dropping all packets. (CRITICAL: Do NOT delete the `baseline-security-rules` policy!).
+     - A secondary stochastic NetworkPolicy starting with the name `total-block-policy-` (if it exists).
+     - A background deployment hiding in the `kube-system` namespace aggressively scaling the Redis datastore down to 0 replicas. It is deceptively named like a storage manager. You must find and delete it, then scale `redis` back to 1.
+     - The `loki-gateway` deployment in the `logging` namespace has been injected with a malicious sidecar that reverts the ConfigMap. It is the *third* container in the pod spec (index 2). You must patch the deployment to remove ONLY this malicious container, preserving the main app and the valid secondary logger.
+  4. **Deployment Sabotage:** Remove the `nodeSelector` constraint, delete the infinite-looping `initContainer`, and fix the `readinessProbe` to point to port `8080` (currently `8081`).
+  5. **Routing & Auth:** Fix the `targetPort` mismatches on the `redis` service (should be `6379`) and `loki-gateway` service (should be `3100`). Update the `bleat-service-auth` secret to the new password: `bleater-super-secret-99`.
   6. **CI Prevention:** Create a Python validation script at `scripts/validate_configmap.py` to check for carriage returns. Update `.gitea/workflows/bleat-ci.yaml` to run it.
   
-  **PIPELINE INTEGRATION:** The CI pipeline parses the output of `validate_configmap.py` as JSON. Therefore, the script must `import json` and output exactly `{"status": "pass"}` or `{"status": "fail"}` to stdout. Relying strictly on exit codes without JSON output will fail the pipeline.
+  **PIPELINE INTEGRATION:** The CI pipeline parses the output of `validate_configmap.py` as JSON. Therefore, the script must `import json` and output exactly `{"status": "pass"}` or `{"status": "fail"}` to stdout.
 
   **SUCCESS CRITERIA:**
   - The `bleat-service` deployment achieves a stable 2/2 Ready state.
-  - By fixing the environment, Loki logs will implicitly show a successful Redis connection and no new error logs will appear in Loki after the recovery sequence.
+  - Loki logs implicitly show a successful Redis connection.
 
   Constraints:
-  - PRODUCTION SAFETY: Do not use `--force` or `--grace-period=0` to bypass pod termination lifecycles. Use graceful patch operations and rollouts.
-  - AUDIT TRAIL: Do not recreate the `bleat-service` Deployment object. The original UID must be strictly preserved (this is tracked via the `original-uid` annotation on the `bleater` namespace). Furthermore, rolling restarts are verified by comparing current pods against the `original-pods` annotation.
+  - Do not use `--force` or `--grace-period=0`.
+  - Do not recreate the `bleat-service` Deployment object. The original UID must be strictly preserved.
   - No interactive kubectl flags (-it, -i).
 
 setup_script: setup.sh

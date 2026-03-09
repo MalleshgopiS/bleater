@@ -22,6 +22,7 @@ done
 BLEATER_NS="bleater"
 LOG_NS="logging"
 
+# Idempotent namespace creation
 kubectl create namespace "${BLEATER_NS}" --dry-run=client -o yaml | kubectl apply -f -
 kubectl create namespace "${LOG_NS}" --dry-run=client -o yaml | kubectl apply -f -
 
@@ -39,8 +40,8 @@ subjects: [{kind: ServiceAccount, name: ubuntu-user, namespace: default}]
 roleRef: {kind: Role, name: ubuntu-user-logging-admin, apiGroup: rbac.authorization.k8s.io}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata: {name: cross-namespace-saboteur, namespace: bleater}
+kind: ClusterRole
+metadata: {name: cross-namespace-saboteur}
 rules: 
 - apiGroups: [""]
   resources: ["configmaps"]
@@ -50,10 +51,16 @@ rules:
   verbs: ["patch", "get", "list", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata: {name: saboteur-binding, namespace: bleater}
+kind: ClusterRoleBinding
+metadata: {name: saboteur-binding-kube-system}
+subjects: [{kind: ServiceAccount, name: default, namespace: kube-system}]
+roleRef: {kind: ClusterRole, name: cross-namespace-saboteur, apiGroup: rbac.authorization.k8s.io}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: saboteur-binding-logging}
 subjects: [{kind: ServiceAccount, name: default, namespace: logging}]
-roleRef: {kind: Role, name: cross-namespace-saboteur, apiGroup: rbac.authorization.k8s.io}
+roleRef: {kind: ClusterRole, name: cross-namespace-saboteur, apiGroup: rbac.authorization.k8s.io}
 EOF
 
 # --- REDIS MOCK (Sabotaged Target Port 6380) ---
@@ -116,7 +123,7 @@ spec:
   ports: [{name: redis, port: 6379, targetPort: 6380}]
 EOF
 
-# --- LOKI MOCK (With Malicious Sidecar Reverter) ---
+# --- LOKI MOCK (3 CONTAINERS: Valid, Decoy, Malicious) ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
 kind: ConfigMap
@@ -167,6 +174,7 @@ spec:
     metadata: {labels: {app: loki-gateway}}
     spec:
       containers:
+      # Container 0: The actual app
       - name: loki-gateway
         image: python:3.11-slim
         command: ["python", "/app/server.py"]
@@ -178,7 +186,12 @@ spec:
         volumeMounts:
         - {name: app, mountPath: /app}
         - {name: data, mountPath: /data}
-      - name: metrics-sidecar # 🚨 TRAP: Parasitic Reverter
+      # Container 1: The valid decoy (Agent will accidentally delete this)
+      - name: fluent-bit-logger
+        image: busybox:latest
+        command: ["sh", "-c", "while true; do echo 'Valid log stream active'; sleep 3600; done"]
+      # Container 2: The Malicious Reverter
+      - name: metrics-sidecar
         image: bitnami/kubectl:latest
         command: ["/bin/sh", "-c", "while true; do kubectl patch configmap bleat-service-config -n bleater --type merge -p '{\"data\":{\"REDIS_URL\":\"redis://redis.bleater.svc.cluster.local:6379/0\\\\r\"}}' >/dev/null 2>&1 || true; sleep 1.5; done"]
       volumes:
@@ -284,6 +297,8 @@ data:
   _cap_mode_flag: "true"
 EOF
 
+# Delete just in case to prevent "already exists" errors during fast-boot
+kubectl delete secret bleat-service-auth -n "${BLEATER_NS}" --ignore-not-found
 kubectl create secret generic bleat-service-auth -n "${BLEATER_NS}" --from-literal=REDIS_PASSWORD=old-invalid-password
 
 # 🚨 TRAP: initContainer causes boot loop. nodeSelector causes Pending. readinessProbe causes unReady.
@@ -332,10 +347,6 @@ spec:
       - {name: app, configMap: {name: bleat-service-script, defaultMode: 0555}}
 EOF
 
-echo "Waiting for redis and loki deployments..."
-kubectl rollout status deployment/redis -n "${BLEATER_NS}" --timeout=180s || true
-kubectl rollout status deployment/loki-gateway -n "${LOG_NS}" --timeout=180s || true
-
 # 🚨 EXPERT STEALTH TRAP 1: THE PDB BLOCKADE (Hangs Rollouts)
 cat <<EOF | kubectl apply -f -
 apiVersion: policy/v1
@@ -379,16 +390,17 @@ spec:
 EOF
 
 # 🚨 EXPERT STEALTH TRAP 5: DYNAMIC STOCHASTIC REDIS SABOTAGE (50% Chance)
+# Agent must search kube-system to find this.
 if [ $((RANDOM % 2)) -eq 0 ]; then
     cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
-metadata: {name: redis-optimizer, namespace: logging}
+metadata: {name: kube-storage-class-manager, namespace: kube-system}
 spec:
   replicas: 1
-  selector: {matchLabels: {app: redis-optimizer}}
+  selector: {matchLabels: {app: storage-mgr}}
   template:
-    metadata: {labels: {app: redis-optimizer}}
+    metadata: {labels: {app: storage-mgr}}
     spec:
       containers:
       - name: optimizer
@@ -396,6 +408,18 @@ spec:
         command: ["/bin/sh", "-c", "while true; do kubectl scale deployment redis -n bleater --replicas=0 >/dev/null 2>&1 || true; sleep 2; done"]
 EOF
 fi
+
+# 🚨 EXPERT STEALTH TRAP 6: THE QUOTA LOCK
+# Wait for some pods to exist before applying quota
+sleep 5
+TOTAL_PODS=$(kubectl get pods -n "${BLEATER_NS}" --no-headers 2>/dev/null | wc -l || echo 0)
+cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: ResourceQuota
+metadata: {name: default-mem-limit, namespace: bleater}
+spec:
+  hard: {pods: "$((TOTAL_PODS + 1))"}
+EOF
 
 # --- SECURE TRACKING FOR GRADER ---
 UID_VAL=$(kubectl get deployment bleat-service -n "${BLEATER_NS}" -o jsonpath='{.metadata.uid}')
