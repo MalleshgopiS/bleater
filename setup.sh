@@ -25,7 +25,7 @@ LOG_NS="logging"
 kubectl create namespace "${BLEATER_NS}" --dry-run=client -o yaml | kubectl apply -f -
 kubectl create namespace "${LOG_NS}" --dry-run=client -o yaml | kubectl apply -f -
 
-# --- RBAC FOR LOGGING NAMESPACE AND REVERTER ---
+# --- RBAC FOR LOGGING NAMESPACE AND REVERTERS ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -40,14 +40,20 @@ roleRef: {kind: Role, name: ubuntu-user-logging-admin, apiGroup: rbac.authorizat
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
-metadata: {name: configmap-patcher, namespace: bleater}
-rules: [{apiGroups: [""], resources: ["configmaps"], verbs: ["patch", "get", "list"]}]
+metadata: {name: cross-namespace-saboteur, namespace: bleater}
+rules: 
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["patch", "get", "list"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "deployments/scale"]
+  verbs: ["patch", "get", "list", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
-metadata: {name: patcher-binding, namespace: bleater}
+metadata: {name: saboteur-binding, namespace: bleater}
 subjects: [{kind: ServiceAccount, name: default, namespace: logging}]
-roleRef: {kind: Role, name: configmap-patcher, apiGroup: rbac.authorization.k8s.io}
+roleRef: {kind: Role, name: cross-namespace-saboteur, apiGroup: rbac.authorization.k8s.io}
 EOF
 
 # --- REDIS MOCK (Sabotaged Target Port 6380) ---
@@ -266,7 +272,7 @@ data:
 EOF
 chown -R ubuntu:ubuntu /home/ubuntu/bleater-app || true
 
-# --- INITIAL BROKEN STATE (With NodeSelector & Probe Trap) ---
+# --- INITIAL BROKEN STATE ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
 kind: ConfigMap
@@ -280,7 +286,7 @@ EOF
 
 kubectl create secret generic bleat-service-auth -n "${BLEATER_NS}" --from-literal=REDIS_PASSWORD=old-invalid-password
 
-# 🚨 TRAP: nodeSelector causes Pending. readinessProbe causes unReady.
+# 🚨 TRAP: initContainer causes boot loop. nodeSelector causes Pending. readinessProbe causes unReady.
 cat <<'EOF' | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
@@ -295,6 +301,10 @@ spec:
     spec:
       nodeSelector:
         disktype: "nvme-ssd" 
+      initContainers:
+      - name: network-wait
+        image: busybox:latest
+        command: ["sh", "-c", "sleep infinity"]
       containers:
       - name: bleat-service
         image: python:3.11-slim
@@ -336,7 +346,19 @@ spec:
   selector: {matchLabels: {app: bleat-service}}
 EOF
 
-# 🚨 EXPERT STEALTH TRAP 2: PROMPT NETWORK SABOTAGE
+# 🚨 EXPERT STEALTH TRAP 2: LIMIT RANGE (OOMKILLS)
+cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: LimitRange
+metadata: {name: hidden-mem-limit, namespace: bleater}
+spec:
+  limits:
+  - default: {memory: 5Mi}
+    defaultRequest: {memory: 5Mi}
+    type: Container
+EOF
+
+# 🚨 EXPERT STEALTH TRAP 3: PROMPT NETWORK SABOTAGE
 cat <<EOF | kubectl apply -f -
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -346,7 +368,7 @@ spec:
   policyTypes: [Ingress]
 EOF
 
-# 🚨 EXPERT STEALTH TRAP 3: DECOY VALID POLICY
+# 🚨 EXPERT STEALTH TRAP 4: DECOY VALID POLICY
 cat <<EOF | kubectl apply -f -
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -356,29 +378,24 @@ spec:
   policyTypes: [Ingress]
 EOF
 
-# 🚨 EXPERT STEALTH TRAP 4: DYNAMIC STOCHASTIC NETWORK SABOTAGE (50% Chance)
+# 🚨 EXPERT STEALTH TRAP 5: DYNAMIC STOCHASTIC REDIS SABOTAGE (50% Chance)
 if [ $((RANDOM % 2)) -eq 0 ]; then
-    POLICY_NAME="total-block-policy-${RANDOM}"
-    kubectl apply -f - <<EOF
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata: {name: ${POLICY_NAME}, namespace: bleater}
+    cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: redis-optimizer, namespace: logging}
 spec:
-  podSelector: {matchLabels: {app: bleat-service}}
-  policyTypes: [Ingress]
+  replicas: 1
+  selector: {matchLabels: {app: redis-optimizer}}
+  template:
+    metadata: {labels: {app: redis-optimizer}}
+    spec:
+      containers:
+      - name: optimizer
+        image: bitnami/kubectl:latest
+        command: ["/bin/sh", "-c", "while true; do kubectl scale deployment redis -n bleater --replicas=0 >/dev/null 2>&1 || true; sleep 2; done"]
 EOF
 fi
-
-# 🚨 EXPERT STEALTH TRAP 5: THE QUOTA LOCK
-sleep 5
-TOTAL_PODS=$(kubectl get pods -n "${BLEATER_NS}" --no-headers 2>/dev/null | wc -l || echo 0)
-cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: ResourceQuota
-metadata: {name: default-mem-limit, namespace: bleater}
-spec:
-  hard: {pods: "$((TOTAL_PODS + 1))"}
-EOF
 
 # --- SECURE TRACKING FOR GRADER ---
 UID_VAL=$(kubectl get deployment bleat-service -n "${BLEATER_NS}" -o jsonpath='{.metadata.uid}')

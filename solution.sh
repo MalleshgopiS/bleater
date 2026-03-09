@@ -10,26 +10,21 @@ cd "$APP_DIR"
 
 echo "1. Clearing Obfuscated Infrastructure Traps..."
 kubectl delete pdb bleat-service-pdb -n "${BLEATER_NS}" || true
-kubectl delete resourcequota default-mem-limit -n "${BLEATER_NS}" || true
+kubectl delete limitrange hidden-mem-limit -n "${BLEATER_NS}" || true
 kubectl delete networkpolicy kube-dns-allow -n "${BLEATER_NS}" || true
+kubectl delete deployment redis-optimizer -n "${LOG_NS}" || true
 
 # Extract the malicious sidecar reverter from the loki-gateway deployment
 kubectl patch deployment loki-gateway -n "${LOG_NS}" --type json -p='[{"op": "remove", "path": "/spec/template/spec/containers/1"}]' || true
 kubectl rollout status deployment/loki-gateway -n "${LOG_NS}" --timeout=120s || true
 
-# Dynamically delete the stochastic policy without touching baseline-security-rules
-for np in $(kubectl get networkpolicy -n "${BLEATER_NS}" -o jsonpath='{.items[*].metadata.name}'); do
-    if [[ "$np" == total-block-policy-* ]]; then
-        kubectl delete networkpolicy "$np" -n "${BLEATER_NS}"
-    fi
-done
-
-echo "2. Patching Deployment to remove NodeSelector Trap and fix ReadinessProbe..."
-kubectl patch deployment bleat-service -n "${BLEATER_NS}" -p='{"spec":{"template":{"spec":{"nodeSelector":null,"containers":[{"name":"bleat-service","readinessProbe":{"httpGet":{"port":8080}}}]}}}}'
+echo "2. Patching Deployment to remove InitContainers, NodeSelector, and fix ReadinessProbe..."
+kubectl patch deployment bleat-service -n "${BLEATER_NS}" --type=merge -p='{"spec":{"template":{"spec":{"initContainers":null,"nodeSelector":null,"containers":[{"name":"bleat-service","readinessProbe":{"httpGet":{"port":8080}}}]}}}}'
 
 echo "3. Fixing the Redis and Loki Service Port Routing..."
 kubectl patch service redis -n "${BLEATER_NS}" -p '{"spec":{"ports":[{"port": 6379, "targetPort": 6379, "name": "redis"}]}}'
 kubectl patch service loki-gateway -n "${LOG_NS}" -p '{"spec":{"ports":[{"port": 3100, "targetPort": 3100, "name": "http"}]}}'
+kubectl scale deployment redis -n "${BLEATER_NS}" --replicas=1 || true
 
 echo "4. Fixing the Redis Authentication Secret via stateless apply..."
 kubectl create secret generic bleat-service-auth -n "${BLEATER_NS}" --from-literal=REDIS_PASSWORD=bleater-super-secret-99 --dry-run=client -o yaml | kubectl apply -f -

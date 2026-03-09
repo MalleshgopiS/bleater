@@ -70,34 +70,36 @@ def get_loki_entries():
     return True, "Loki log store readable", entries
 
 def check_infrastructure_traps():
-    """Verifies that the stealth traps (Quota, PDB, malicious Policies, Sidecar) are deleted, while valid policies remain."""
-    rq, _, _ = run(f"kubectl get resourcequota default-mem-limit -n {BLEATER_NS}")
+    """Verifies that the stealth traps (LimitRange, PDB, malicious Policies, Sidecar, Optimizer) are deleted, while valid policies remain."""
+    lr, _, _ = run(f"kubectl get limitrange hidden-mem-limit -n {BLEATER_NS}")
     np1, _, _ = run(f"kubectl get networkpolicy kube-dns-allow -n {BLEATER_NS}")
     pdb, _, _ = run(f"kubectl get pdb bleat-service-pdb -n {BLEATER_NS}")
-    
-    code, np_out, _ = run(f"kubectl get networkpolicy -n {BLEATER_NS} -o name")
-    has_random_np = any("total-block-policy-" in line for line in np_out.splitlines())
+    opt, _, _ = run(f"kubectl get deployment redis-optimizer -n {LOG_NS}")
     
     code, sidecar_out, _ = run(f"kubectl get deployment loki-gateway -n {LOG_NS} -o jsonpath='{{.spec.template.spec.containers[*].name}}'")
     has_sidecar = "metrics-sidecar" in sidecar_out
     
     valid_np, _, _ = run(f"kubectl get networkpolicy baseline-security-rules -n {BLEATER_NS}")
     
-    if rq != 0 and np1 != 0 and pdb != 0 and not has_sidecar and not has_random_np and valid_np == 0:
+    if lr != 0 and np1 != 0 and pdb != 0 and opt != 0 and not has_sidecar and valid_np == 0:
         return True, "Stealth traps cleared and valid policies preserved"
     return False, "Traps are still active or valid policies were deleted"
 
 def check_deployment_sabotage_fixed():
-    """Verifies that the invalid nodeSelector was removed and the readinessProbe is on port 8080."""
+    """Verifies that the invalid nodeSelector and initContainers were removed and the readinessProbe is on port 8080."""
     code, out, _ = run(f"kubectl get deployment {DEPLOY} -n {BLEATER_NS} -o jsonpath='{{.spec.template.spec.nodeSelector}}'")
     if out.strip() and out.strip() != "{}": 
         return False, "Deployment is still restricted by the invalid nodeSelector"
         
+    code, out, _ = run(f"kubectl get deployment {DEPLOY} -n {BLEATER_NS} -o jsonpath='{{.spec.template.spec.initContainers}}'")
+    if out.strip() and out.strip() != "[]": 
+        return False, "Deployment is still blocked by malicious initContainers"
+
     code, out, _ = run(f"kubectl get deployment {DEPLOY} -n {BLEATER_NS} -o jsonpath='{{.spec.template.spec.containers[0].readinessProbe.httpGet.port}}'")
     if str(out) != "8080":
         return False, "Deployment readinessProbe is still pointing to the wrong port"
         
-    return True, "Deployment scheduling and probes are configured correctly"
+    return True, "Deployment scheduling, init processes, and probes are configured correctly"
 
 def check_routing_and_auth():
     """Verifies that the Redis and Loki service ports are correct and the Secret is updated."""
