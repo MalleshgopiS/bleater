@@ -71,6 +71,11 @@ def get_loki_entries():
         except json.JSONDecodeError: continue
     return True, "Loki log store readable", entries
 
+def check_rogue_removed():
+    code, _, _ = run("kubectl get cronjob legacy-config-sync -n default")
+    if code != 0: return True, "Rogue config reverter has been successfully neutralized"
+    return False, "Rogue CronJob is still active and periodically corrupting the environment"
+
 def check_live_configmap():
     code, out, err = run(f"kubectl get configmap {CONFIGMAP} -n {BLEATER_NS} -o json")
     if code != 0: return False, f"Could not read live ConfigMap: {err}"
@@ -154,7 +159,6 @@ def check_validation_script():
     script = TASK_ROOT / "scripts" / "validate_configmap.py"
     if not script.exists(): return False, "Validation script missing"
     
-    # 🚨 CHECK LINTER RULE
     script_text = script.read_text(encoding="utf-8")
     if "import ast" not in script_text:
         return False, "Validation script missing mandatory 'ast' import for static analysis compliance"
@@ -182,6 +186,7 @@ def check_workflow_hook():
 
 def grade(transcript: str) -> GradingResult:
     checks = {
+        "rogue_cleared": check_rogue_removed,
         "live_configmap_clean": check_live_configmap,
         "repo_manifest_clean": check_repo_manifest,
         "deployment_uid_preserved": check_uid_preserved,

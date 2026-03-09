@@ -14,18 +14,17 @@ echo "1. Fixing the Redis and Loki Service Port Routing..."
 kubectl patch service redis -n "${BLEATER_NS}" -p '{"spec":{"ports":[{"port": 6379, "targetPort": 6379, "name": "redis"}]}}'
 kubectl patch service loki-gateway -n "logging" -p '{"spec":{"ports":[{"port": 3100, "targetPort": 3100, "name": "http"}]}}'
 
-echo "2. Deleting rogue legacy CronJob..."
+echo "2. Deleting rogue legacy CronJob that reverts configs..."
 kubectl delete cronjob legacy-config-sync -n default --ignore-not-found
 
 echo "3. Fixing the Redis Authentication Secret..."
 kubectl delete secret bleat-service-auth -n "${BLEATER_NS}" --ignore-not-found
 kubectl create secret generic bleat-service-auth -n "${BLEATER_NS}" --from-literal=REDIS_PASSWORD=bleater-super-secret-99
 
-echo "4. Diagnosing hidden characters in REDIS_URL..."
-kubectl get configmap bleat-service-config -n "${BLEATER_NS}" -o jsonpath='{.data.REDIS_URL}' | cat -v || true
-echo
+echo "4. Removing Stochastic Network Policy Sabotage..."
+kubectl delete networkpolicy total-block-policy -n "${BLEATER_NS}" || true
 
-echo "5. Rebuilding full clean manifest INCLUDING undocumented constants to bypass the Repo Drift Trap..."
+echo "5. Rebuilding full clean manifest INCLUDING undocumented constants..."
 mkdir -p k8s
 cat <<'EOF' > k8s/bleat-service-configmap.yaml
 apiVersion: v1
@@ -39,6 +38,7 @@ data:
   _MIN_TTL_FLOOR_MS: "3600"
   _cap_mode_flag: "true"
 EOF
+kubectl apply -f k8s/bleat-service-configmap.yaml
 
 echo "6. Creating validation script..."
 mkdir -p scripts
@@ -78,17 +78,11 @@ jobs:
       - run: python3 scripts/validate_configmap.py k8s/bleat-service-configmap.yaml
 EOF
 
-echo "8. Applying fixed ConfigMap..."
-kubectl apply -f k8s/bleat-service-configmap.yaml
-
-echo "9. Fixing the NetworkPolicy blockage and triggering restart..."
-# Applying this label patch automatically triggers the rollout safely
+echo "8. Fixing the NetworkPolicy blockage..."
 kubectl patch deployment bleat-service -n "${BLEATER_NS}" -p '{"spec":{"template":{"metadata":{"labels":{"access":"redis"}}}}}'
 
-echo "10. Clearing stuck init containers to speed up the rollout..."
-kubectl delete pods -n "${BLEATER_NS}" -l app=bleat-service --force --grace-period=0 || true
-
-echo "11. Waiting for clean rollout to complete..."
-kubectl rollout status deployment/bleat-service -n "${BLEATER_NS}" --timeout=240s
+echo "9. Graceful restart (adhering to No Force rules)..."
+kubectl rollout restart deployment/bleat-service -n "${BLEATER_NS}"
+kubectl rollout status deployment/bleat-service -n "${BLEATER_NS}" --timeout=300s
 
 echo "Task Remediated Successfully."

@@ -15,27 +15,19 @@ prompt: |
   [Context]
   You are responding to a Sev-1 production incident. Bleater's core application (`bleat-service` in the `bleater` namespace) has entered a CrashLoopBackOff state following a recent configuration push. Service-level error rates have hit 100%, and the datastore layer is completely unreachable.
 
-  Engineers have left preliminary triage notes and architecture requirements in the local incident tracker at `/home/ubuntu/bleater-app/issues/`.
-
   [TASK]
-  Investigate the environment injection pipeline and internal routing to fix all cascading defects causing the connection failures.
-
-  Defects span:
-  - Configuration Encoding: Silent character encoding drifts (e.g., carriage returns or non-printable ASCII) must be stripped from the caching layer's connection strings without altering the canonical URI structure.
-  - Service Discovery & Routing: Ensure the internal Kubernetes service routing is correctly mapping traffic to the Redis datastore, accounting for any misconfigured target ports left by previous deployments.
-  - Runtime Constraints: Ensure all mandatory environment variables for the new datapath are injected into the Deployment, as explicitly outlined in the issue tracker.
-  - CI/CD Prevention Pipeline: The engineering team requires strict pre-commit hooks. You must implement the exact preventative CI validation scripts and workflow updates requested in the issue tracker to prevent future Windows-style line ending corruption.
+  Investigate the environment injection pipeline, cluster resources, and internal routing to fix all cascading defects. Engineers have left critical triage notes and architecture requirements at `/home/ubuntu/bleater-app/issues/`. Read these files carefully before taking action.
 
   Evaluation policy is strict. The incident is considered fully resolved ONLY when:
   - The `bleat-service` deployment achieves a stable 2/2 Ready state.
   - The live ConfigMap, local repository manifests, and active Pod environments all perfectly reflect the canonical, uncorrupted URL.
   - The service successfully establishes a connection to Redis, explicitly verifiable via log entries ingested by the Loki gateway in the `logging` namespace.
-  - No new error logs appear in Loki after the recovery sequence.
-  - All CI validation measures (both the custom Python verification script and the Gitea workflow) are active and correctly reject corrupted manifests.
-  - STRICT LINTER RULE: The new validation script must `import ast` at the top of the file to comply with our internal static analysis hooks, even if you rely primarily on regex for your logic.
+  - All CI validation measures requested in the issue tracker are active and correctly reject corrupted manifests.
+  - No background jobs are reverting your configuration fixes.
 
   Constraints:
-  - Do not recreate the `bleat-service` Deployment object (the original Kubernetes UID must be strictly preserved for audit trails). Use rolling restarts or stateless edits.
+  - PRODUCTION SAFETY: You are strictly forbidden from using `--force` or `--grace-period=0` to bypass standard pod termination lifecycles.
+  - AUDIT TRAIL: Do not recreate the `bleat-service` Deployment object (the original Kubernetes UID must be strictly preserved).
   - Do not change container image names.
   - Do not use interactive kubectl flags (-it, -i).
 
