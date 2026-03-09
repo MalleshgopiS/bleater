@@ -7,24 +7,20 @@ APP_DIR="/home/ubuntu/bleater-app"
 
 cd "$APP_DIR"
 
-echo "0. Removing strict ResourceQuota blocking the rollout..."
-kubectl delete resourcequota bleater-strict-quota -n "${BLEATER_NS}" || true
+echo "1. Clearing Obfuscated Infrastructure Traps..."
+kubectl delete cronjob metrics-collector-job -n kube-system || true
+kubectl delete resourcequota default-mem-limit -n "${BLEATER_NS}" || true
+kubectl delete networkpolicy kube-dns-allow -n "${BLEATER_NS}" || true
 
-echo "1. Fixing the Redis and Loki Service Port Routing..."
+echo "2. Fixing the Redis and Loki Service Port Routing..."
 kubectl patch service redis -n "${BLEATER_NS}" -p '{"spec":{"ports":[{"port": 6379, "targetPort": 6379, "name": "redis"}]}}'
 kubectl patch service loki-gateway -n "logging" -p '{"spec":{"ports":[{"port": 3100, "targetPort": 3100, "name": "http"}]}}'
-
-echo "2. Deleting rogue legacy CronJob that reverts configs..."
-kubectl delete cronjob legacy-config-sync -n default --ignore-not-found
 
 echo "3. Fixing the Redis Authentication Secret..."
 kubectl delete secret bleat-service-auth -n "${BLEATER_NS}" --ignore-not-found
 kubectl create secret generic bleat-service-auth -n "${BLEATER_NS}" --from-literal=REDIS_PASSWORD=bleater-super-secret-99
 
-echo "4. Removing Stochastic Network Policy Sabotage..."
-kubectl delete networkpolicy total-block-policy -n "${BLEATER_NS}" || true
-
-echo "5. Rebuilding full clean manifest INCLUDING undocumented constants..."
+echo "4. Rebuilding ConfigMap with mandatory constants..."
 mkdir -p k8s
 cat <<'EOF' > k8s/bleat-service-configmap.yaml
 apiVersion: v1
@@ -40,7 +36,7 @@ data:
 EOF
 kubectl apply -f k8s/bleat-service-configmap.yaml
 
-echo "6. Creating validation script..."
+echo "5. Creating AST validation script..."
 mkdir -p scripts
 cat <<'EOF' > scripts/validate_configmap.py
 #!/usr/bin/env python3
@@ -51,21 +47,18 @@ ESC = re.compile(r"(\\r|\\x0d|\\u000d)", re.I)
 
 def check(p):
     t=p.read_text()
-    if "\r" in t: return 1
-    if CONTROL.search(t): return 1
-    if ESC.search(t): return 1
+    if "\r" in t or CONTROL.search(t) or ESC.search(t): return 1
     return 0
 
 rc=0
 for f in sys.argv[1:]:
     p=pathlib.Path(f)
-    if not p.exists(): rc=1
-    else: rc=max(rc,check(p))
+    if not p.exists() or check(p) != 0: rc=1
 sys.exit(rc)
 EOF
 chmod +x scripts/validate_configmap.py
 
-echo "7. Updating CI workflow..."
+echo "6. Updating CI workflow..."
 mkdir -p .gitea/workflows
 cat <<'EOF' > .gitea/workflows/bleat-ci.yaml
 name: bleat-ci
@@ -78,10 +71,7 @@ jobs:
       - run: python3 scripts/validate_configmap.py k8s/bleat-service-configmap.yaml
 EOF
 
-echo "8. Fixing the NetworkPolicy blockage..."
-kubectl patch deployment bleat-service -n "${BLEATER_NS}" -p '{"spec":{"template":{"metadata":{"labels":{"access":"redis"}}}}}'
-
-echo "9. Graceful restart (adhering to No Force rules)..."
+echo "7. Graceful Rollout (No force flags)..."
 kubectl rollout restart deployment/bleat-service -n "${BLEATER_NS}"
 kubectl rollout status deployment/bleat-service -n "${BLEATER_NS}" --timeout=300s
 

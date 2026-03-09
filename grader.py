@@ -14,8 +14,6 @@ DEPLOY = "bleat-service"
 CONFIGMAP = "bleat-service-config"
 EXPECTED_REDIS_URL = "redis://redis.bleater.svc.cluster.local:6379/0"
 TASK_ROOT = Path("/home/ubuntu/bleater-app")
-UID_FILE = Path("/tmp/bleat-service-deployment-uid")
-PODS_FILE = Path("/tmp/bleat-service-original-pods")
 
 def run(cmd: str, timeout: int = 30):
     try:
@@ -72,9 +70,9 @@ def get_loki_entries():
     return True, "Loki log store readable", entries
 
 def check_rogue_removed():
-    code, _, _ = run("kubectl get cronjob legacy-config-sync -n default")
-    if code != 0: return True, "Rogue config reverter has been successfully neutralized"
-    return False, "Rogue CronJob is still active and periodically corrupting the environment"
+    code, out, _ = run("kubectl get cronjob metrics-collector-job -n kube-system")
+    if code != 0: return True, "Stealth Rogue CronJob has been cleared"
+    return False, "Stealth Rogue CronJob is still actively reverting configs in kube-system"
 
 def check_live_configmap():
     code, out, err = run(f"kubectl get configmap {CONFIGMAP} -n {BLEATER_NS} -o json")
@@ -84,9 +82,9 @@ def check_live_configmap():
         data = configmap.get("data", {})
         redis_url = data.get("REDIS_URL", "")
         
-        if data.get("_ROUTING_RETRY_DELAY_MS") != "0": return False, "Implementation detail _ROUTING_RETRY_DELAY_MS missing or mutated"
-        if data.get("_MIN_TTL_FLOOR_MS") != "3600": return False, "Implementation detail _MIN_TTL_FLOOR_MS missing or mutated"
-        if data.get("_cap_mode_flag") != "true": return False, "Implementation detail _cap_mode_flag missing or mutated"
+        if data.get("_ROUTING_RETRY_DELAY_MS") != "0": return False, "Legacy tuning flag _ROUTING_RETRY_DELAY_MS missing or mutated"
+        if data.get("_MIN_TTL_FLOOR_MS") != "3600": return False, "Legacy tuning flag _MIN_TTL_FLOOR_MS missing or mutated"
+        if data.get("_cap_mode_flag") != "true": return False, "Legacy tuning flag _cap_mode_flag missing or mutated"
     except Exception as exc:
         return False, f"Could not parse ConfigMap: {exc}"
 
@@ -101,29 +99,31 @@ def check_repo_manifest():
     text = manifest.read_text(encoding="utf-8", errors="strict")
     
     if "_ROUTING_RETRY_DELAY_MS" not in text or "_MIN_TTL_FLOOR_MS" not in text or "_cap_mode_flag" not in text:
-        return False, "Harness file integrity compromised: missing production decoy constants in repo manifest"
+        return False, "Repo manifest is missing mandatory legacy tuning constants"
 
     has_control = any((ord(ch) < 32 and ch not in "\n\t") or ord(ch) == 127 for ch in text)
     if EXPECTED_REDIS_URL in text and "\\r" not in text and "\r" not in text and not has_control:
         return True, "Checked-out manifest is clean"
-    return False, "Checked-out manifest still contains encoded or hidden control characters"
+    return False, "Checked-out manifest contains encoded control characters"
 
 def check_uid_preserved():
-    if not UID_FILE.exists(): return False, "Missing stored original deployment UID"
-    original_uid = UID_FILE.read_text(encoding="utf-8").strip()
-    code, current_uid, err = run(f"kubectl get deployment {DEPLOY} -n {BLEATER_NS} -o jsonpath='{{.metadata.uid}}'")
-    if code != 0: return False, f"Could not read current deployment UID: {err}"
+    code, out, _ = run(f"kubectl get namespace {BLEATER_NS} -o jsonpath='{{.metadata.annotations.original-uid}}'")
+    original_uid = out.strip()
+    if not original_uid: return False, "Could not find original deployment UID annotation"
     
+    code, current_uid, err = run(f"kubectl get deployment {DEPLOY} -n {BLEATER_NS} -o jsonpath='{{.metadata.uid}}'")
     if original_uid != current_uid: return False, "Deployment UID changed; expected a rolling restart"
     return True, "Deployment object was preserved"
 
 def check_rollout_restart():
-    if not PODS_FILE.exists(): return False, "Missing original pod snapshot"
-    original_pods = {line.strip() for line in PODS_FILE.read_text(encoding="utf-8").splitlines() if line.strip()}
+    code, out, _ = run(f"kubectl get namespace {BLEATER_NS} -o jsonpath='{{.metadata.annotations.original-pods}}'")
+    if not out.strip(): return False, "Could not find original pod snapshot annotation"
+    original_pods = {p.strip() for p in out.split(",") if p.strip()}
+    
     current_pods = set(get_running_pods())
     if bool(original_pods) and bool(current_pods) and original_pods.isdisjoint(current_pods):
-        return True, "Pods were replaced during a rolling restart"
-    return False, "Rolling restart not detected"
+        return True, "Pods were replaced gracefully during a rolling restart"
+    return False, "Rolling restart not detected (pods overlap or missing)"
 
 def check_deployment_ready():
     if wait_for_ready(timeout=150): return True, "bleat-service deployment is fully Ready"
@@ -133,9 +133,8 @@ def check_pod_env():
     pods = get_running_pods()
     if not pods: return False, "No bleat-service pods found"
     code, out, err = run(f"kubectl exec -n {BLEATER_NS} {pods[0]} -- printenv REDIS_URL")
-    if code != 0: return False, f"Could not read REDIS_URL from running pod: {err}"
     if out == EXPECTED_REDIS_URL: return True, "Running bleat-service pod uses the cleaned REDIS_URL"
-    return False, f"Running pod still has stale REDIS_URL: {out!r}"
+    return False, f"Running pod still has stale REDIS_URL"
 
 def check_loki_success():
     ok, msg, entries = get_loki_entries()
@@ -153,7 +152,7 @@ def check_loki_no_new_errors():
     latest_success = max(success_ts)
     newer_errors = [e for e in relevant if int(e.get("ts", "0")) > latest_success and e.get("labels", {}).get("level") == "error"]
     if not newer_errors: return True, "No newer bleat-service error logs appear after Redis recovery"
-    return False, "Loki still contains bleat-service error logs after the latest success event"
+    return False, "Loki still contains error logs after recovery"
 
 def check_validation_script():
     script = TASK_ROOT / "scripts" / "validate_configmap.py"
@@ -161,7 +160,7 @@ def check_validation_script():
     
     script_text = script.read_text(encoding="utf-8")
     if "import ast" not in script_text:
-        return False, "Validation script missing mandatory 'ast' import for static analysis compliance"
+        return False, "Validation script failed security mandate (missing 'ast' import)"
 
     with tempfile.TemporaryDirectory() as tmpdir:
         good_manifest = Path(tmpdir) / "good.yaml"

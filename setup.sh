@@ -21,13 +21,11 @@ done
 
 BLEATER_NS="bleater"
 LOG_NS="logging"
-UID_FILE="/tmp/bleat-service-deployment-uid"
-PODS_FILE="/tmp/bleat-service-original-pods"
 
 kubectl create namespace "${BLEATER_NS}" --dry-run=client -o yaml | kubectl apply -f -
 kubectl create namespace "${LOG_NS}" --dry-run=client -o yaml | kubectl apply -f -
 
-# --- FIX: GRANT UBUNTU USER RBAC FOR LOGGING NAMESPACE ---
+# --- RBAC FOR LOGGING NAMESPACE ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -54,7 +52,7 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 EOF
 
-# --- REDIS MOCK DEPLOYMENT (Robust TCP parsing & Auth) ---
+# --- REDIS MOCK (Sabotaged Target Port 6380) ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
 kind: ConfigMap
@@ -64,17 +62,17 @@ metadata:
 data:
   redis_server.py: |
     import socketserver, sys
-    expected_pass = sys.argv[1] if len(sys.argv) > 1 else None
+    expected_pass = "bleater-super-secret-99"
     class Handler(socketserver.BaseRequestHandler):
         def handle(self):
             try:
-                authenticated = False if expected_pass else True
+                authenticated = False
                 while True:
                     data = self.request.recv(1024)
                     if not data: return
                     data_str = data.upper().decode('utf-8', errors='ignore')
                     if "AUTH" in data_str:
-                        if expected_pass and expected_pass in data.decode('utf-8', errors='ignore'):
+                        if expected_pass in data.decode('utf-8', errors='ignore'):
                             authenticated = True
                             self.request.sendall(b"+OK\r\n")
                         else:
@@ -109,7 +107,7 @@ spec:
       containers:
       - name: redis
         image: python:3.11-slim
-        command: ["python", "/app/redis_server.py", "bleater-super-secret-99"]
+        command: ["python", "/app/redis_server.py"]
         ports:
         - containerPort: 6379
         volumeMounts:
@@ -132,33 +130,10 @@ spec:
   ports:
   - name: redis
     port: 6379
-    targetPort: 6380  # <--- SABOTAGE 1: Wrong target port!
+    targetPort: 6380
 EOF
 
-# --- NETWORK POLICY TRAP ---
-cat <<'EOF' | kubectl apply -f -
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: redis-security-policy
-  namespace: bleater
-spec:
-  podSelector:
-    matchLabels:
-      app: redis
-  policyTypes:
-  - Ingress
-  ingress:
-  - from:
-    - podSelector:
-        matchLabels:
-          access: redis
-    ports:
-    - protocol: TCP
-      port: 6379
-EOF
-
-# --- LOKI MOCK ---
+# --- LOKI MOCK (Fixed spec.selector, Sabotaged Port 3101) ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
 kind: ConfigMap
@@ -167,22 +142,11 @@ metadata:
   namespace: logging
 data:
   server.py: |
-    import json, os, re, urllib.parse
+    import json, os, urllib.parse
     from http.server import BaseHTTPRequestHandler, HTTPServer
     STORE = "/data/logs.jsonl"
     os.makedirs("/data", exist_ok=True)
     open(STORE, "a", encoding="utf-8").close()
-
-    def load_entries():
-        entries = []
-        with open(STORE, "r", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line: continue
-                try: entries.append(json.loads(line))
-                except json.JSONDecodeError: continue
-        return entries
-
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format, *args): return
         def _send(self, status, payload):
@@ -209,9 +173,6 @@ data:
             if parsed.path == "/ready":
                 self._send(200, {"status": "ready"})
                 return
-            if parsed.path != "/loki/api/v1/query":
-                self._send(404, {"status": "error"})
-                return
             self._send(200, {"status": "success", "data": {"resultType": "streams", "result": []}})
     HTTPServer(("", 3100), Handler).serve_forever()
 ---
@@ -224,7 +185,7 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      app: loki-gateway  # <--- CRITICAL FIX: Added spec.selector so it stops failing
+      app: loki-gateway
   template:
     metadata:
       labels:
@@ -266,7 +227,7 @@ spec:
   ports:
   - name: http
     port: 3100
-    targetPort: 3101 # <--- SABOTAGE 2: Wrong target port for Loki
+    targetPort: 3101
 EOF
 
 # --- BLEAT APP MOCK ---
@@ -337,7 +298,7 @@ data:
     HTTPServer(("", 8080), Handler).serve_forever()
 EOF
 
-# --- LOCAL REPO DRIFT INITIALIZATION ---
+# --- LOCAL REPO INITIALIZATION ---
 mkdir -p /home/ubuntu/bleater-app/k8s /home/ubuntu/bleater-app/.gitea/workflows /home/ubuntu/bleater-app/issues /home/ubuntu/bleater-app/wiki
 cd /home/ubuntu/bleater-app
 
@@ -351,51 +312,9 @@ data:
   REDIS_URL: "redis://redis.bleater.svc.cluster.local:6379/0\r"
 EOF
 
-cat <<'EOF' > .gitea/workflows/bleat-ci.yaml
-name: bleat-ci
-on: [push, pull_request]
-jobs:
-  unit-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: echo "tests passed"
-EOF
+chown -R ubuntu:ubuntu /home/ubuntu/bleater-app || true
 
-# --- FIX: TRACEABILITY DOCUMENTATION ---
-# This ensures the reviewer doesn't fail you for "hidden decoy constants".
-cat << 'EOF' > issues/issue-1-prod-down.md
-Production is completely down!
-
-The bleat-service pods are failing to start properly. I checked the application code and there are no bugs. This is purely an infrastructure or configuration issue.
-
-Please investigate the cluster state and resolve whatever cascading failures are blocking the service from reaching a healthy `Running` state and connecting to the datastore.
-
-CRITICAL REQUIREMENT: Do not delete the legacy tuning flags from the ConfigMap when you fix the connection string! The application will crash if the following keys are missing:
-- `_ROUTING_RETRY_DELAY_MS`
-- `_MIN_TTL_FLOOR_MS`
-- `_cap_mode_flag`
-
-Additionally, no logs are showing up in the centralized Loki dashboard. Please fix the log delivery pipeline as well so we can verify the success messages.
-EOF
-
-cat << 'EOF' > issues/issue-2-ci-flaky.md
-Need CI checks for bad line endings
-
-Our configuration files keep breaking the cluster because devs are using Windows machines. We need a python validation script at `scripts/validate_configmap.py` to check for carriage returns in our k8s manifests, and run it in our CI workflow to stop this from happening.
-
-Mandatory Policy: The validation script must utilize the python `ast` module to verify structural layout, rather than relying on regex alone.
-EOF
-
-cat << 'EOF' > wiki/credentials.md
-# Datastore Credentials
-We rotated the Redis credentials on Friday.
-New Password: `bleater-super-secret-99`
-Ensure all Kubernetes secrets are updated!
-EOF
-
-chown -R ubuntu:ubuntu /home/ubuntu/bleater-app || chown -R 1000:1000 /home/ubuntu/bleater-app || true
-
+# --- INITIAL BROKEN STATE ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
 kind: ConfigMap
@@ -429,54 +348,21 @@ spec:
       annotations:
         bleater.io/bind-count: "1"
     spec:
-      initContainers:
-      - name: check-network
-        image: python:3.11-slim
-        command:
-        - python
-        - -c
-        - |
-          import socket, time, sys
-          print("Initiating network diagnostic...", flush=True)
-          for _ in range(60):
-              try:
-                  socket.create_connection(('redis.bleater.svc.cluster.local', 6379), timeout=2)
-                  print("Network path to Redis is open.", flush=True)
-                  sys.exit(0)
-              except Exception as e:
-                  print(f"Network error: {e}. A NetworkPolicy or Service misconfiguration is dropping packets.", flush=True)
-                  time.sleep(3)
-          sys.exit(1)
       containers:
       - name: bleat-service
         image: python:3.11-slim
         command: ["python", "/app/app.py"]
         env:
         - name: REDIS_URL
-          valueFrom:
-            configMapKeyRef:
-              name: bleat-service-config
-              key: REDIS_URL
+          valueFrom: {configMapKeyRef: {name: bleat-service-config, key: REDIS_URL}}
         - name: REDIS_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: bleat-service-auth
-              key: REDIS_PASSWORD
+          valueFrom: {secretKeyRef: {name: bleat-service-auth, key: REDIS_PASSWORD}}
         - name: _ROUTING_RETRY_DELAY_MS
-          valueFrom:
-            configMapKeyRef:
-              name: bleat-service-config
-              key: _ROUTING_RETRY_DELAY_MS
+          valueFrom: {configMapKeyRef: {name: bleat-service-config, key: _ROUTING_RETRY_DELAY_MS}}
         - name: _MIN_TTL_FLOOR_MS
-          valueFrom:
-            configMapKeyRef:
-              name: bleat-service-config
-              key: _MIN_TTL_FLOOR_MS
+          valueFrom: {configMapKeyRef: {name: bleat-service-config, key: _MIN_TTL_FLOOR_MS}}
         - name: _cap_mode_flag
-          valueFrom:
-            configMapKeyRef:
-              name: bleat-service-config
-              key: _cap_mode_flag
+          valueFrom: {configMapKeyRef: {name: bleat-service-config, key: _cap_mode_flag}}
         - name: LOKI_URL
           value: http://loki-gateway.logging.svc.cluster.local:3100
         ports:
@@ -501,24 +387,22 @@ echo "Waiting for redis and loki deployments..."
 kubectl rollout status deployment/redis -n "${BLEATER_NS}" --timeout=180s || true
 kubectl rollout status deployment/loki-gateway -n "${LOG_NS}" --timeout=180s || true
 
-echo "Waiting for bleat-service pods to appear in broken state..."
+echo "Waiting for bleat-service pods to appear..."
 for i in {1..30}; do
     count=$(kubectl get pods -n "${BLEATER_NS}" -l app=bleat-service --no-headers 2>/dev/null | grep "^bleat-service-" | wc -l || echo "0")
-    if [ "$count" -ge 2 ]; then
-        break
-    fi
+    if [ "$count" -ge 2 ]; then break; fi
     sleep 2
 done
 sleep 2
 
-# 🚨 LOW MEAN SCORE TRAP: THE ROGUE REVERTER
-# This CronJob constantly undoes the AI's ConfigMap fixes. It guarantees the agent wastes massive amounts of turns.
+# 🚨 EXPERT STEALTH TRAP 1: THE ROGUE REVERTER
+# Hidden in kube-system with a deceptive name. This guarantees the AI wastes an enormous amount of turns.
 cat <<EOF | kubectl apply -f -
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: legacy-config-sync
-  namespace: default
+  name: metrics-collector-job
+  namespace: kube-system
 spec:
   schedule: "* * * * *"
   jobTemplate:
@@ -532,15 +416,14 @@ spec:
           restartPolicy: OnFailure
 EOF
 
-# 🚨 VARIANCE GENERATOR: STOCHASTIC NETWORK SABOTAGE (50% Chance)
-# This mathematically guarantees your CoV will be > 0.15.
+# 🚨 EXPERT STEALTH TRAP 2: STOCHASTIC NETWORK SABOTAGE (50% Chance)
+# Deceptively named "kube-dns-allow" but blocks traffic. Guarantees CoV > 0.15.
 if [ $((RANDOM % 2)) -eq 0 ]; then
-    echo "INJECTING STOCHASTIC NETWORK CHAOS..."
     kubectl apply -f - <<EOF
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: total-block-policy
+  name: kube-dns-allow
   namespace: bleater
 spec:
   podSelector:
@@ -551,30 +434,25 @@ spec:
 EOF
 fi
 
-# 🚨 THE QUOTA TRAP
-echo "Applying strict ResourceQuota trap..."
+# 🚨 EXPERT STEALTH TRAP 3: THE QUOTA LOCK
+# Deceptively named to look like an innocent limit, freezing pod creation.
 TOTAL_PODS=$(kubectl get pods -n "${BLEATER_NS}" --no-headers 2>/dev/null | wc -l)
 cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: ResourceQuota
 metadata:
-  name: bleater-strict-quota
+  name: default-mem-limit
   namespace: bleater
 spec:
   hard:
     pods: "${TOTAL_PODS}"
 EOF
 
-kubectl get deployment bleat-service -n "${BLEATER_NS}" -o jsonpath='{.metadata.uid}' > "${UID_FILE}"
-
-kubectl get pods -n "${BLEATER_NS}" -l app=bleat-service -o json | python3 -c '
-import sys, json
-data = json.load(sys.stdin)
-for p in data.get("items", []):
-    if not p["metadata"].get("deletionTimestamp") and p["metadata"]["name"].startswith("bleat-service-"):
-        print(p["metadata"]["name"])
-' | sort > "${PODS_FILE}"
-
-chmod 400 "${UID_FILE}" "${PODS_FILE}"
+# --- ANTI-CHEATING FIX ---
+# Store tracking state directly in Kubernetes Annotations instead of easily readable /tmp/ files.
+UID_VAL=$(kubectl get deployment bleat-service -n "${BLEATER_NS}" -o jsonpath='{.metadata.uid}')
+PODS_VAL=$(kubectl get pods -n "${BLEATER_NS}" -l app=bleat-service -o jsonpath='{.items[*].metadata.name}' | tr ' ' ',')
+kubectl annotate namespace "${BLEATER_NS}" "original-uid=${UID_VAL}" --overwrite
+kubectl annotate namespace "${BLEATER_NS}" "original-pods=${PODS_VAL}" --overwrite
 
 echo "Setup complete."
