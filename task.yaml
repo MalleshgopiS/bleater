@@ -28,7 +28,7 @@ prompt: |
      - A background deployment hiding in the `default` namespace named `cluster-dns-monitor`. It continuously reverts the deployment's readinessProbe. Delete it.
      - A background deployment hiding in the `default` namespace named `cluster-redis-optimizer` (if it exists). It actively scales Redis down to 0. Delete it and ensure Redis is scaled to 1.
      - The `loki-gateway` deployment in the `logging` namespace has been injected with a malicious sidecar that reverts the ConfigMap. It is the *third* container in the pod spec (index 2). Patch the deployment to remove ONLY this malicious container (you must preserve the `fluent-bit-logger` container).
-  4. **Deployment Sabotage:** - The deployment update strategy is deadlocked (`maxSurge: 0`, `maxUnavailable: 0`). You MUST patch it back to `25%` for both before restarting.
+  4. **Deployment Sabotage:** - The deployment update strategy is deadlocked (`maxSurge: 0` combined with the PDB). You MUST patch `maxSurge` back to `25%` before restarting.
      - Remove the `affinity` node constraint, delete the `initContainer`, and fix the `readinessProbe` to point to port `8080`.
      - Inject a new environment variable `SUPPRESS_WARNINGS=1` into the container.
   5. **Routing & Auth:** Fix the `targetPort` mismatches on the `redis` service (should be `6379`) and `loki-gateway` service (should be `3100`). Update the `bleat-service-auth` secret to the new password: `bleater-super-secret-99`.
@@ -38,11 +38,10 @@ prompt: |
 
   **SUCCESS CRITERIA:**
   - The `bleat-service` deployment has 2 fully Ready replicas.
-  - Loki logs must explicitly log the exact string "redis connection established".
-  - No new error logs appear in Loki after the recovery sequence.
+  - Loki logs implicitly show a successful Redis connection with no legacy errors.
 
   Constraints:
-  - Do not use `--force` or `--grace-period=0`.
+  - Do not use `--force` or `--grace-period=0` (verified by checking kubectl commands).
   - Do not recreate the `bleat-service` Deployment object. The original UID must be preserved (tracked via the `original-uid` annotation).
   - You must perform a rolling restart so that all original pods are completely replaced with new pods (tracked via the `original-pods` annotation).
 

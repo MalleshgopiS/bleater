@@ -301,7 +301,7 @@ spec:
     type: RollingUpdate
     rollingUpdate:
       maxSurge: 0
-      maxUnavailable: 0
+      maxUnavailable: "25%" # 🚨 Valid K8s API, but deadlocks when paired with maxUnavailable:0 PDB
   selector: {matchLabels: {app: bleat-service}}
   template:
     metadata:
@@ -416,7 +416,6 @@ spec:
 EOF
 
 # 🚨 DYNAMIC STOCHASTIC REDIS SABOTAGE (50% Chance)
-# Agent must search default namespace to find this.
 if [ $((RANDOM % 2)) -eq 0 ]; then
     cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1

@@ -15,7 +15,6 @@ kubectl delete resourcequota default-mem-limit -n "${BLEATER_NS}" || true
 kubectl delete networkpolicy kube-dns-allow -n "${BLEATER_NS}" || true
 kubectl delete networkpolicy loki-deny-all -n "${LOG_NS}" || true
 
-# These are successfully deleted from default namespace where ubuntu-user has natural access
 kubectl delete deployment cluster-redis-optimizer -n default || true
 kubectl delete deployment cluster-dns-monitor -n default || true
 
@@ -67,8 +66,7 @@ kubectl scale deployment redis -n "${BLEATER_NS}" --replicas=1 || true
 echo "Waiting for Redis to spin up..."
 kubectl rollout status deployment/redis -n "${BLEATER_NS}" --timeout=60s || true
 
-echo "5. Patching Deployment to remove Affinity, InitContainers, and fix ReadinessProbe..."
-# Doing this AFTER fixing the configmap and redis ensures the pods don't crashloop on boot.
+echo "5. Patching Deployment to remove Deadlocks, Affinity, InitContainers, and fix ReadinessProbe..."
 kubectl patch deployment bleat-service -n "${BLEATER_NS}" --type=merge -p='{"spec":{"strategy":{"rollingUpdate":{"maxSurge":"25%","maxUnavailable":"25%"}}}}' || true
 kubectl patch deployment bleat-service -n "${BLEATER_NS}" --type=json -p='[{"op": "remove", "path": "/spec/template/spec/affinity"}]' || true
 kubectl patch deployment bleat-service -n "${BLEATER_NS}" --type=json -p='[{"op": "remove", "path": "/spec/template/spec/initContainers"}]' || true

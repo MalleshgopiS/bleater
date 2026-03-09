@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import re
 from pathlib import Path
 from apex_arena._types import GradingResult
 
@@ -56,18 +57,30 @@ def get_running_pods():
     except Exception:
         return []
 
-def get_loki_entries():
-    code, pod_name, err = run("kubectl get pods -n logging -l app=loki-gateway -o jsonpath='{.items[0].metadata.name}'")
-    if code != 0 or not pod_name: return False, f"Could not locate Loki pod: {err}", []
-    code, out, err = run(f"kubectl exec -n {LOG_NS} {pod_name} -c loki-gateway -- cat /data/logs.jsonl", timeout=20)
-    if code != 0: return False, f"Could not read Loki log store: {err}", []
-    entries = []
-    for line in out.splitlines():
-        line = line.strip()
-        if not line: continue
-        try: entries.append(json.loads(line))
-        except json.JSONDecodeError: continue
-    return True, "Loki log store readable", entries
+def get_loki_entries_with_retry(retries=3, delay=5):
+    for _ in range(retries):
+        code, pod_name, err = run(f"kubectl get pods -n logging -l app=loki-gateway -o jsonpath='{{.items[0].metadata.name}}'")
+        if code != 0 or not pod_name: 
+            time.sleep(delay)
+            continue
+            
+        code, out, err = run(f"kubectl exec -n {LOG_NS} {pod_name} -c loki-gateway -- cat /data/logs.jsonl", timeout=20)
+        if code != 0: 
+            time.sleep(delay)
+            continue
+            
+        entries = []
+        for line in out.splitlines():
+            line = line.strip()
+            if not line: continue
+            try: entries.append(json.loads(line))
+            except json.JSONDecodeError: continue
+            
+        if entries:
+            return True, "Loki log store readable", entries
+        time.sleep(delay)
+        
+    return False, "Could not read Loki log store or it was empty", []
 
 def check_quotas_and_limits():
     """Verifies that ResourceQuota, LimitRange, and PodDisruptionBudget traps are deleted."""
@@ -112,9 +125,8 @@ def check_deployment_sabotage_fixed():
         
         # 1. Strategy check (Deadlock fix)
         surge = str(spec.get("strategy", {}).get("rollingUpdate", {}).get("maxSurge", ""))
-        unavail = str(spec.get("strategy", {}).get("rollingUpdate", {}).get("maxUnavailable", ""))
-        if surge == "0" or unavail == "0":
-            return False, "Deployment strategy is still deadlocked"
+        if surge == "0":
+            return False, "Deployment strategy is still deadlocked (maxSurge is 0)"
             
         template_spec = spec.get("template", {}).get("spec", {})
         
@@ -147,8 +159,12 @@ def check_routing_and_auth():
     try: pw = base64.b64decode(secret_out).decode('utf-8') if c3 == 0 else ""
     except: pw = ""
         
+    code, redis_replicas, _ = run(f"kubectl get deployment redis -n {BLEATER_NS} -o jsonpath='{{.spec.replicas}}'")
+    if str(redis_replicas) == "0":
+        return False, "Redis datastore is scaled to 0 replicas"
+        
     if str(redis_port) == "6379" and str(loki_port) == "3100" and pw == "bleater-super-secret-99":
-        return True, "Routing and authentication configured correctly"
+        return True, "Routing, authentication, and datastore scale configured correctly"
     return False, "Service ports or authentication secrets are incorrect"
 
 def check_live_configmap():
@@ -221,7 +237,7 @@ def check_pod_env():
 
 def check_loki_success():
     """Parses the Loki log gateway to ensure a successful Redis connection was established."""
-    ok, msg, entries = get_loki_entries()
+    ok, msg, entries = get_loki_entries_with_retry()
     if not ok: return False, msg
     success_entries = [e for e in entries if e.get("labels", {}).get("app") == "bleat-service" and "redis connection established" in e.get("message", "").lower()]
     if success_entries: return True, "Loki contains a successful Redis connection log"
@@ -229,7 +245,7 @@ def check_loki_success():
 
 def check_loki_no_new_errors():
     """Ensures no new error logs are thrown by the application after the success timestamp."""
-    ok, msg, entries = get_loki_entries()
+    ok, msg, entries = get_loki_entries_with_retry()
     if not ok: return False, msg
     relevant = [e for e in entries if e.get("labels", {}).get("app") == "bleat-service"]
     
@@ -284,9 +300,8 @@ def check_workflow_hook():
 
 def check_no_force_used(transcript: str):
     """Verifies that the agent did not cheat by using --force or --grace-period=0."""
-    # Standard check. Using regex is too brittle, simple string is fine for this context.
-    if "--force" in transcript or "--grace-period=0" in transcript:
-        return False, "Agent violated constraints by using --force or --grace-period=0"
+    if re.search(r'kubectl[^\n]*(--force|--grace-period=0)', transcript):
+        return False, "Agent violated constraints by using --force or --grace-period=0 in kubectl commands"
     return True, "Constraints respected (no --force)"
 
 def grade(transcript: str) -> GradingResult:
