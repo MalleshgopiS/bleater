@@ -8,19 +8,28 @@ APP_DIR="/home/ubuntu/bleater-app"
 cd "$APP_DIR"
 
 echo "1. Clearing Obfuscated Infrastructure Traps..."
-kubectl delete cronjob metrics-collector-job -n "${BLEATER_NS}" || true
+kubectl delete deployment cluster-metrics-agent -n "${BLEATER_NS}" || true
 kubectl delete resourcequota default-mem-limit -n "${BLEATER_NS}" || true
 kubectl delete networkpolicy kube-dns-allow -n "${BLEATER_NS}" || true
-kubectl delete networkpolicy total-block-policy -n "${BLEATER_NS}" || true
 
-echo "2. Fixing the Redis and Loki Service Port Routing..."
+# Dynamically delete the stochastic policy
+for np in $(kubectl get networkpolicy -n "${BLEATER_NS}" -o jsonpath='{.items[*].metadata.name}'); do
+    if [[ "$np" == total-block-policy-* ]]; then
+        kubectl delete networkpolicy "$np" -n "${BLEATER_NS}"
+    fi
+done
+
+echo "2. Patching Deployment to remove NodeSelector Trap..."
+kubectl patch deployment bleat-service -n "${BLEATER_NS}" --type=merge -p='{"spec":{"template":{"spec":{"nodeSelector":null}}}}'
+
+echo "3. Fixing the Redis and Loki Service Port Routing..."
 kubectl patch service redis -n "${BLEATER_NS}" -p '{"spec":{"ports":[{"port": 6379, "targetPort": 6379, "name": "redis"}]}}'
 kubectl patch service loki-gateway -n "logging" -p '{"spec":{"ports":[{"port": 3100, "targetPort": 3100, "name": "http"}]}}'
 
-echo "3. Fixing the Redis Authentication Secret via stateless apply..."
+echo "4. Fixing the Redis Authentication Secret via stateless apply..."
 kubectl create secret generic bleat-service-auth -n "${BLEATER_NS}" --from-literal=REDIS_PASSWORD=bleater-super-secret-99 --dry-run=client -o yaml | kubectl apply -f -
 
-echo "4. Rebuilding ConfigMap with mandatory constants..."
+echo "5. Rebuilding ConfigMap with mandatory constants..."
 mkdir -p k8s
 cat <<'EOF' > k8s/bleat-service-configmap.yaml
 apiVersion: v1
@@ -36,14 +45,14 @@ data:
 EOF
 kubectl apply -f k8s/bleat-service-configmap.yaml
 
-echo "5. Creating JSON validation script..."
+echo "6. Creating JSON validation script..."
 mkdir -p scripts
 cat <<'EOF' > scripts/validate_configmap.py
 #!/usr/bin/env python3
 import json, pathlib, sys
 
 def check(p):
-    # Use read_bytes() to prevent Python from auto-converting \r to \n
+    # Use read_bytes() to bypass python newline translation
     t = p.read_bytes()
     return b"\r" in t
 
@@ -60,7 +69,7 @@ sys.exit(rc)
 EOF
 chmod +x scripts/validate_configmap.py
 
-echo "6. Updating CI workflow..."
+echo "7. Updating CI workflow..."
 mkdir -p .gitea/workflows
 cat <<'EOF' > .gitea/workflows/bleat-ci.yaml
 name: bleat-ci
@@ -73,7 +82,7 @@ jobs:
       - run: python3 scripts/validate_configmap.py k8s/bleat-service-configmap.yaml
 EOF
 
-echo "7. Graceful Rollout (No force flags)..."
+echo "8. Graceful Rollout (No force flags)..."
 kubectl rollout restart deployment/bleat-service -n "${BLEATER_NS}"
 kubectl rollout status deployment/bleat-service -n "${BLEATER_NS}" --timeout=300s
 

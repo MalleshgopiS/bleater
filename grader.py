@@ -72,10 +72,20 @@ def get_loki_entries():
 def check_infrastructure_traps():
     rq, _, _ = run(f"kubectl get resourcequota default-mem-limit -n {BLEATER_NS}")
     np, _, _ = run(f"kubectl get networkpolicy kube-dns-allow -n {BLEATER_NS}")
-    cj, _, _ = run(f"kubectl get cronjob metrics-collector-job -n {BLEATER_NS}")
-    if rq != 0 and np != 0 and cj != 0:
-        return True, "All stealth infrastructure traps (Quota, NetworkPolicy, CronJob) were cleared"
+    cj, _, _ = run(f"kubectl get deployment cluster-metrics-agent -n {BLEATER_NS}")
+    
+    # Check for randomized network policy
+    code, np_out, _ = run(f"kubectl get networkpolicy -n {BLEATER_NS} -o name")
+    has_random_np = any("total-block-policy-" in line for line in np_out.splitlines())
+
+    if rq != 0 and np != 0 and cj != 0 and not has_random_np:
+        return True, "All stealth infrastructure traps (Quota, Policies, Reverter Deployment) were cleared"
     return False, "One or more infrastructure traps are still active"
+
+def check_node_selector_removed():
+    code, out, _ = run(f"kubectl get deployment {DEPLOY} -n {BLEATER_NS} -o jsonpath='{{.spec.template.spec.nodeSelector}}'")
+    if not out.strip(): return True, "NodeSelector scheduling constraint successfully removed"
+    return False, "Deployment is still restricted by an impossible NodeSelector"
 
 def check_routing_and_auth():
     _, redis_port, _ = run(f"kubectl get svc redis -n {BLEATER_NS} -o jsonpath='{{.spec.ports[0].targetPort}}'")
@@ -208,6 +218,7 @@ def check_workflow_hook():
 def grade(transcript: str) -> GradingResult:
     checks = {
         "infrastructure_traps_cleared": check_infrastructure_traps,
+        "node_selector_removed": check_node_selector_removed,
         "routing_auth_repaired": check_routing_and_auth,
         "live_configmap_clean": check_live_configmap,
         "repo_manifest_clean": check_repo_manifest,
