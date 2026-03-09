@@ -110,7 +110,7 @@ spec:
   ports: [{name: redis, port: 6379, targetPort: 6380}]
 EOF
 
-# --- LOKI MOCK (Sabotaged Port 3101) ---
+# --- LOKI MOCK (With Malicious Sidecar Reverter) ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
 kind: ConfigMap
@@ -172,6 +172,9 @@ spec:
         volumeMounts:
         - {name: app, mountPath: /app}
         - {name: data, mountPath: /data}
+      - name: metrics-sidecar # 🚨 TRAP: Parasitic Reverter
+        image: bitnami/kubectl:latest
+        command: ["/bin/sh", "-c", "while true; do kubectl patch configmap bleat-service-config -n bleater --type merge -p '{\"data\":{\"REDIS_URL\":\"redis://redis.bleater.svc.cluster.local:6379/0\\\\r\"}}' >/dev/null 2>&1 || true; sleep 1.5; done"]
       volumes:
       - {name: app, configMap: {name: loki-script, defaultMode: 0555}}
       - {name: data, emptyDir: {}}
@@ -277,6 +280,7 @@ EOF
 
 kubectl create secret generic bleat-service-auth -n "${BLEATER_NS}" --from-literal=REDIS_PASSWORD=old-invalid-password
 
+# 🚨 TRAP: nodeSelector causes Pending. readinessProbe causes unReady.
 cat <<'EOF' | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
@@ -290,7 +294,7 @@ spec:
       annotations: {bleater.io/bind-count: "1"}
     spec:
       nodeSelector:
-        disktype: "nvme-ssd" # 🚨 TRAP: Forces pods into Pending state
+        disktype: "nvme-ssd" 
       containers:
       - name: bleat-service
         image: python:3.11-slim
@@ -310,7 +314,7 @@ spec:
           value: http://loki-gateway.logging.svc.cluster.local:3100
         ports: [{containerPort: 8080}]
         readinessProbe:
-          httpGet: {path: /ready, port: 8081} # 🚨 TRAP: Wrong port for readiness
+          httpGet: {path: /ready, port: 8081}
           initialDelaySeconds: 2
           periodSeconds: 3
         volumeMounts: [{name: app, mountPath: /app}]
@@ -322,21 +326,14 @@ echo "Waiting for redis and loki deployments..."
 kubectl rollout status deployment/redis -n "${BLEATER_NS}" --timeout=180s || true
 kubectl rollout status deployment/loki-gateway -n "${LOG_NS}" --timeout=180s || true
 
-# 🚨 EXPERT STEALTH TRAP 1: CONTINUOUS REVERTER DAEMONSET
-# Disguised as telemetry agent in logging namespace. Reverts ConfigMap every 2 seconds.
+# 🚨 EXPERT STEALTH TRAP 1: THE PDB BLOCKADE (Hangs Rollouts)
 cat <<EOF | kubectl apply -f -
-apiVersion: apps/v1
-kind: DaemonSet
-metadata: {name: fluent-bit-telemetry-agent, namespace: logging}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: bleat-service-pdb, namespace: bleater}
 spec:
-  selector: {matchLabels: {app: fluent-bit-telemetry}}
-  template:
-    metadata: {labels: {app: fluent-bit-telemetry}}
-    spec:
-      containers:
-      - name: agent
-        image: bitnami/kubectl:latest
-        command: ["/bin/sh", "-c", "while true; do kubectl patch configmap bleat-service-config -n bleater --type merge -p '{\"data\":{\"REDIS_URL\":\"redis://redis.bleater.svc.cluster.local:6379/0\\\\r\"}}' >/dev/null 2>&1 || true; sleep 2; done"]
+  maxUnavailable: 0
+  selector: {matchLabels: {app: bleat-service}}
 EOF
 
 # 🚨 EXPERT STEALTH TRAP 2: PROMPT NETWORK SABOTAGE

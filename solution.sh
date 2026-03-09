@@ -9,18 +9,22 @@ APP_DIR="/home/ubuntu/bleater-app"
 cd "$APP_DIR"
 
 echo "1. Clearing Obfuscated Infrastructure Traps..."
-kubectl delete daemonset fluent-bit-telemetry-agent -n "${LOG_NS}" || true
+kubectl delete pdb bleat-service-pdb -n "${BLEATER_NS}" || true
 kubectl delete resourcequota default-mem-limit -n "${BLEATER_NS}" || true
+kubectl delete networkpolicy kube-dns-allow -n "${BLEATER_NS}" || true
 
-# Dynamically delete all NetworkPolicies blocking traffic without touching baseline-security-rules
+# Extract the malicious sidecar reverter from the loki-gateway deployment
+kubectl patch deployment loki-gateway -n "${LOG_NS}" --type json -p='[{"op": "remove", "path": "/spec/template/spec/containers/1"}]' || true
+kubectl rollout status deployment/loki-gateway -n "${LOG_NS}" --timeout=120s || true
+
+# Dynamically delete the stochastic policy without touching baseline-security-rules
 for np in $(kubectl get networkpolicy -n "${BLEATER_NS}" -o jsonpath='{.items[*].metadata.name}'); do
-    if [[ "$np" == total-block-policy-* ]] || [[ "$np" == kube-dns-allow ]]; then
+    if [[ "$np" == total-block-policy-* ]]; then
         kubectl delete networkpolicy "$np" -n "${BLEATER_NS}"
     fi
 done
 
 echo "2. Patching Deployment to remove NodeSelector Trap and fix ReadinessProbe..."
-# Using default Strategic Merge Patch so it doesn't drop the 'image' field
 kubectl patch deployment bleat-service -n "${BLEATER_NS}" -p='{"spec":{"template":{"spec":{"nodeSelector":null,"containers":[{"name":"bleat-service","readinessProbe":{"httpGet":{"port":8080}}}]}}}}'
 
 echo "3. Fixing the Redis and Loki Service Port Routing..."

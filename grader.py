@@ -59,7 +59,7 @@ def get_running_pods():
 def get_loki_entries():
     code, pod_name, err = run("kubectl get pods -n logging -l app=loki-gateway -o jsonpath='{.items[0].metadata.name}'")
     if code != 0 or not pod_name: return False, f"Could not locate Loki pod: {err}", []
-    code, out, err = run(f"kubectl exec -n {LOG_NS} {pod_name} -- cat /data/logs.jsonl", timeout=20)
+    code, out, err = run(f"kubectl exec -n {LOG_NS} {pod_name} -c loki-gateway -- cat /data/logs.jsonl", timeout=20)
     if code != 0: return False, f"Could not read Loki log store: {err}", []
     entries = []
     for line in out.splitlines():
@@ -70,17 +70,20 @@ def get_loki_entries():
     return True, "Loki log store readable", entries
 
 def check_infrastructure_traps():
-    """Verifies that the stealth traps (Quota, malicious Policies, DaemonSet) are deleted, while valid policies remain."""
+    """Verifies that the stealth traps (Quota, PDB, malicious Policies, Sidecar) are deleted, while valid policies remain."""
     rq, _, _ = run(f"kubectl get resourcequota default-mem-limit -n {BLEATER_NS}")
     np1, _, _ = run(f"kubectl get networkpolicy kube-dns-allow -n {BLEATER_NS}")
-    rogue, _, _ = run(f"kubectl get daemonset fluent-bit-telemetry-agent -n {LOG_NS}")
+    pdb, _, _ = run(f"kubectl get pdb bleat-service-pdb -n {BLEATER_NS}")
     
     code, np_out, _ = run(f"kubectl get networkpolicy -n {BLEATER_NS} -o name")
     has_random_np = any("total-block-policy-" in line for line in np_out.splitlines())
     
+    code, sidecar_out, _ = run(f"kubectl get deployment loki-gateway -n {LOG_NS} -o jsonpath='{{.spec.template.spec.containers[*].name}}'")
+    has_sidecar = "metrics-sidecar" in sidecar_out
+    
     valid_np, _, _ = run(f"kubectl get networkpolicy baseline-security-rules -n {BLEATER_NS}")
     
-    if rq != 0 and np1 != 0 and rogue != 0 and not has_random_np and valid_np == 0:
+    if rq != 0 and np1 != 0 and pdb != 0 and not has_sidecar and not has_random_np and valid_np == 0:
         return True, "Stealth traps cleared and valid policies preserved"
     return False, "Traps are still active or valid policies were deleted"
 

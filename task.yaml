@@ -20,10 +20,11 @@ prompt: |
   1. **Configuration Corruption:** The `REDIS_URL` in the `bleat-service-config` ConfigMap contains hidden control characters (CRLF). The local repository manifest at `k8s/bleat-service-configmap.yaml` must also be corrected. The `REDIS_URL` environment variable inside the running pod must exactly match the canonical URL: `redis://redis.bleater.svc.cluster.local:6379/0`
   2. **Circuit Breaker Integrity:** You MUST preserve the legacy tuning constants in the ConfigMap exactly as follows: `_ROUTING_RETRY_DELAY_MS` must be `"0"`, `_MIN_TTL_FLOOR_MS` must be `"3600"`, and `_cap_mode_flag` must be `"true"`. Removing them will cause a fatal application panic.
   3. **Stealth Infrastructure Traps:** The rogue deployment left behind severe traps freezing the rollout and continuously reverting configurations. Hunt down and fix:
+     - A restrictive PodDisruptionBudget named `bleat-service-pdb` is permanently freezing rollouts by requiring 100% availability. Delete it.
      - A stealthy ResourceQuota named `default-mem-limit` in the `bleater` namespace.
      - A deceptive NetworkPolicy named `kube-dns-allow` in the `bleater` namespace dropping all packets.
      - A secondary stochastic NetworkPolicy starting with the name `total-block-policy-` in the `bleater` namespace (if it exists, its suffix is randomized).
-     - A malicious workload (DaemonSet) named `fluent-bit-telemetry-agent` hiding in the `logging` namespace that continuously reverts the ConfigMap every 2 seconds.
+     - A malicious sidecar container named `metrics-sidecar` hiding inside the `loki-gateway` deployment in the `logging` namespace. It continuously reverts the ConfigMap every 1.5 seconds. You must patch the deployment to remove this container.
      - **CRITICAL:** Do NOT delete the `baseline-security-rules` NetworkPolicy! It is required for compliance.
   4. **Deployment Sabotage:**
      - A `nodeSelector` constraint on the `bleat-service` deployment is forcing pods to schedule on a non-existent `nvme-ssd` node type. You must remove this selector.
