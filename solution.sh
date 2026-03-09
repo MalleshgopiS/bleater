@@ -8,50 +8,8 @@ APP_DIR="/home/ubuntu/bleater-app"
 
 cd "$APP_DIR"
 
-echo "1. Clearing Obfuscated Infrastructure Traps..."
-kubectl delete pdb bleat-service-pdb -n "${BLEATER_NS}" || true
-kubectl delete limitrange hidden-mem-limit -n "${BLEATER_NS}" || true
-kubectl delete resourcequota default-mem-limit -n "${BLEATER_NS}" || true
-kubectl delete networkpolicy kube-dns-allow -n "${BLEATER_NS}" || true
-kubectl delete networkpolicy loki-deny-all -n "${LOG_NS}" || true
-
-# Because we added the RBAC RoleBinding for ubuntu-user to access kube-system, this will successfully delete the saboteurs!
-kubectl delete deployment redis-autoscaler -n kube-system || true
-kubectl delete deployment kube-dns-healthcheck -n kube-system || true
-
-# Extract the malicious sidecar reverter from the loki-gateway deployment
-# Note: It is the 3rd container (index 2)
-kubectl patch deployment loki-gateway -n "${LOG_NS}" --type json -p='[{"op": "remove", "path": "/spec/template/spec/containers/2"}]' || true
-kubectl rollout status deployment/loki-gateway -n "${LOG_NS}" --timeout=120s || true
-
-echo "2. Patching Deployment to remove Affinity, InitContainers, and fix ReadinessProbe..."
-# Using array JSON patches to precisely remove bad structures
-kubectl patch deployment bleat-service -n "${BLEATER_NS}" --type=json -p='[{"op": "remove", "path": "/spec/template/spec/affinity"}]' || true
-kubectl patch deployment bleat-service -n "${BLEATER_NS}" --type=json -p='[{"op": "remove", "path": "/spec/template/spec/initContainers"}]' || true
-kubectl patch deployment bleat-service -n "${BLEATER_NS}" --type=json -p='[{"op": "replace", "path": "/spec/template/spec/containers/0/readinessProbe/httpGet/port", "value": 8080}]' || true
-
-echo "3. Fixing the Redis and Loki Service Port Routing..."
-kubectl patch service redis -n "${BLEATER_NS}" -p '{"spec":{"ports":[{"port": 6379, "targetPort": 6379, "name": "redis"}]}}'
-kubectl patch service loki-gateway -n "${LOG_NS}" -p '{"spec":{"ports":[{"port": 3100, "targetPort": 3100, "name": "http"}]}}'
-
-echo "4. Fixing Redis Autoscaler scale to 1..."
-kubectl scale deployment redis -n "${BLEATER_NS}" --replicas=1 || true
-kubectl rollout status deployment/redis -n "${BLEATER_NS}" --timeout=60s || true
-
-echo "5. Fixing the Redis Authentication Secret via stateless apply..."
-kubectl delete secret bleat-service-auth -n "${BLEATER_NS}" --ignore-not-found || true
-kubectl create secret generic bleat-service-auth -n "${BLEATER_NS}" --from-literal=REDIS_PASSWORD=bleater-super-secret-99
-
-# Dynamically delete the stochastic policy without touching baseline-security-rules
-for np in $(kubectl get networkpolicy -n "${BLEATER_NS}" -o jsonpath='{.items[*].metadata.name}'); do
-    if [[ "$np" == total-block-policy-* ]]; then
-        kubectl delete networkpolicy "$np" -n "${BLEATER_NS}"
-    fi
-done
-
-echo "6. Rebuilding Immutable ConfigMap with mandatory constants..."
-# Must delete first because original is immutable: true
-kubectl delete configmap bleat-service-config -n "${BLEATER_NS}" --ignore-not-found
+echo "1. Rebuilding Immutable ConfigMap with mandatory constants FIRST to avoid boot loops..."
+kubectl delete configmap bleat-service-config -n "${BLEATER_NS}" --ignore-not-found || true
 mkdir -p k8s
 cat <<'EOF' > k8s/bleat-service-configmap.yaml
 apiVersion: v1
@@ -66,6 +24,46 @@ data:
   _cap_mode_flag: "true"
 EOF
 kubectl apply -f k8s/bleat-service-configmap.yaml
+
+echo "2. Fixing the Redis Authentication Secret..."
+kubectl delete secret bleat-service-auth -n "${BLEATER_NS}" --ignore-not-found || true
+kubectl create secret generic bleat-service-auth -n "${BLEATER_NS}" --from-literal=REDIS_PASSWORD=bleater-super-secret-99
+
+echo "3. Clearing Obfuscated Infrastructure Traps..."
+kubectl delete pdb bleat-service-pdb -n "${BLEATER_NS}" || true
+kubectl delete limitrange hidden-mem-limit -n "${BLEATER_NS}" || true
+kubectl delete resourcequota default-mem-limit -n "${BLEATER_NS}" || true
+kubectl delete networkpolicy kube-dns-allow -n "${BLEATER_NS}" || true
+kubectl delete networkpolicy loki-deny-all -n "${LOG_NS}" || true
+kubectl delete deployment redis-autoscaler -n kube-system || true
+kubectl delete deployment kube-dns-healthcheck -n kube-system || true
+
+# Extract the malicious sidecar reverter from the loki-gateway deployment
+# Note: It is the 3rd container (index 2)
+kubectl patch deployment loki-gateway -n "${LOG_NS}" --type json -p='[{"op": "remove", "path": "/spec/template/spec/containers/2"}]' || true
+
+# Dynamically delete the stochastic policy without touching baseline-security-rules
+for np in $(kubectl get networkpolicy -n "${BLEATER_NS}" -o jsonpath='{.items[*].metadata.name}'); do
+    if [[ "$np" == total-block-policy-* ]]; then
+        kubectl delete networkpolicy "$np" -n "${BLEATER_NS}"
+    fi
+done
+
+echo "4. Fixing the Redis and Loki Service Port Routing..."
+kubectl patch service redis -n "${BLEATER_NS}" -p '{"spec":{"ports":[{"port": 6379, "targetPort": 6379, "name": "redis"}]}}' || true
+kubectl patch service loki-gateway -n "${LOG_NS}" -p '{"spec":{"ports":[{"port": 3100, "targetPort": 3100, "name": "http"}]}}' || true
+kubectl scale deployment redis -n "${BLEATER_NS}" --replicas=1 || true
+
+echo "Waiting for Redis to spin up..."
+kubectl rollout status deployment/redis -n "${BLEATER_NS}" --timeout=60s || true
+
+echo "5. Patching Deployment to remove Affinity, InitContainers, and fix ReadinessProbe..."
+# Doing this AFTER fixing the configmap and redis ensures the pods don't crashloop on boot.
+kubectl patch deployment bleat-service -n "${BLEATER_NS}" --type=json -p='[{"op": "remove", "path": "/spec/template/spec/affinity"}, {"op": "remove", "path": "/spec/template/spec/initContainers"}, {"op": "replace", "path": "/spec/template/spec/containers/0/readinessProbe/httpGet/port", "value": 8080}]' || true
+
+echo "6. Wait for final rollouts..."
+kubectl rollout status deployment/loki-gateway -n "${LOG_NS}" --timeout=120s || true
+kubectl rollout status deployment/bleat-service -n "${BLEATER_NS}" --timeout=150s || true
 
 echo "7. Creating JSON validation script..."
 mkdir -p scripts
@@ -102,9 +100,5 @@ jobs:
       - uses: actions/checkout@8ade135a41bc03ea155e62e844d188df1ea18608
       - run: python3 scripts/validate_configmap.py k8s/bleat-service-configmap.yaml
 EOF
-
-echo "9. Graceful Rollout (No force flags)..."
-kubectl rollout restart deployment/bleat-service -n "${BLEATER_NS}"
-kubectl rollout status deployment/bleat-service -n "${BLEATER_NS}" --timeout=300s
 
 echo "Task Remediated Successfully."

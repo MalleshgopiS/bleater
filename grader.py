@@ -69,28 +69,39 @@ def get_loki_entries():
         except json.JSONDecodeError: continue
     return True, "Loki log store readable", entries
 
-def check_infrastructure_traps():
-    """Verifies that the stealth traps (Quota, LimitRange, PDB, malicious Policies, Sidecar, Optimizer, and Deployment Reverter) are deleted, while valid policies remain."""
+def check_quotas_and_limits():
+    """Verifies that ResourceQuota, LimitRange, and PodDisruptionBudget traps are deleted."""
     rq, _, _ = run(f"kubectl get resourcequota default-mem-limit -n {BLEATER_NS}")
     lr, _, _ = run(f"kubectl get limitrange hidden-mem-limit -n {BLEATER_NS}")
+    pdb, _, _ = run(f"kubectl get pdb bleat-service-pdb -n {BLEATER_NS}")
+    
+    if rq != 0 and lr != 0 and pdb != 0:
+        return True, "Quotas, limits, and PDB traps successfully cleared"
+    return False, "One or more resource limits/quotas/PDBs are still active"
+
+def check_network_policies():
+    """Verifies malicious NetworkPolicies are deleted while valid ones are preserved."""
     np1, _, _ = run(f"kubectl get networkpolicy kube-dns-allow -n {BLEATER_NS}")
     np2, _, _ = run(f"kubectl get networkpolicy loki-deny-all -n {LOG_NS}")
-    pdb, _, _ = run(f"kubectl get pdb bleat-service-pdb -n {BLEATER_NS}")
-    opt, _, _ = run(f"kubectl get deployment redis-autoscaler -n kube-system")
-    dh, _, _ = run(f"kubectl get deployment kube-dns-healthcheck -n kube-system")
-    
     code, np_out, _ = run(f"kubectl get networkpolicy -n {BLEATER_NS} -o name")
     has_random_np = any("total-block-policy-" in line for line in np_out.splitlines())
+    valid_np, _, _ = run(f"kubectl get networkpolicy baseline-security-rules -n {BLEATER_NS}")
     
+    if np1 != 0 and np2 != 0 and not has_random_np and valid_np == 0:
+        return True, "Malicious network policies cleared, valid policies preserved"
+    return False, "Malicious policies remain or valid policies were deleted"
+
+def check_saboteurs_removed():
+    """Verifies that the cross-namespace saboteur deployments and malicious sidecars are removed."""
+    opt, _, _ = run(f"kubectl get deployment redis-autoscaler -n kube-system")
+    dh, _, _ = run(f"kubectl get deployment kube-dns-healthcheck -n kube-system")
     code, sidecar_out, _ = run(f"kubectl get deployment loki-gateway -n {LOG_NS} -o jsonpath='{{.spec.template.spec.containers[*].name}}'")
     has_sidecar = "metrics-sidecar" in sidecar_out
     has_valid_decoy = "fluent-bit-logger" in sidecar_out
     
-    valid_np, _, _ = run(f"kubectl get networkpolicy baseline-security-rules -n {BLEATER_NS}")
-    
-    if rq != 0 and lr != 0 and np1 != 0 and np2 != 0 and pdb != 0 and opt != 0 and dh != 0 and not has_sidecar and has_valid_decoy and not has_random_np and valid_np == 0:
-        return True, "Stealth traps cleared, valid secondary logger preserved, and valid policies preserved"
-    return False, "Traps are still active, valid logger was deleted, or valid policies were deleted"
+    if opt != 0 and dh != 0 and not has_sidecar and has_valid_decoy:
+        return True, "All saboteur deployments and sidecars were cleared"
+    return False, "Saboteur processes are still active or valid sidecars were removed"
 
 def check_deployment_sabotage_fixed():
     """Verifies that the invalid affinity and initContainers were removed and the readinessProbe is on port 8080."""
@@ -258,21 +269,30 @@ def check_workflow_hook():
         return True, "CI workflow invokes the ConfigMap validation step"
     return False, "CI workflow does not call the ConfigMap validation step"
 
+def check_no_force_used(transcript: str):
+    """Verifies that the agent did not cheat by using --force or --grace-period=0."""
+    if "--force" in transcript or "--grace-period=0" in transcript:
+        return False, "Agent violated constraints by using --force or --grace-period=0"
+    return True, "Constraints respected (no --force)"
+
 def grade(transcript: str) -> GradingResult:
     checks = {
-        "infrastructure_traps_cleared": check_infrastructure_traps,
-        "deployment_sabotage_fixed": check_deployment_sabotage_fixed,
-        "routing_auth_repaired": check_routing_and_auth,
-        "live_configmap_clean": check_live_configmap,
-        "repo_manifest_clean": check_repo_manifest,
-        "deployment_uid_preserved": check_uid_preserved,
-        "rolling_restart_detected": check_rollout_restart,
-        "deployment_ready": check_deployment_ready,
-        "pod_env_updated": check_pod_env,
-        "loki_success_logged": check_loki_success,
-        "loki_errors_cleared": check_loki_no_new_errors,
-        "validation_script_enforced": check_validation_script,
-        "workflow_hooks_validation": check_workflow_hook,
+        "quotas_and_limits_cleared": lambda: check_quotas_and_limits(),
+        "network_policies_cleared": lambda: check_network_policies(),
+        "saboteurs_removed": lambda: check_saboteurs_removed(),
+        "deployment_sabotage_fixed": lambda: check_deployment_sabotage_fixed(),
+        "routing_auth_repaired": lambda: check_routing_and_auth(),
+        "live_configmap_clean": lambda: check_live_configmap(),
+        "repo_manifest_clean": lambda: check_repo_manifest(),
+        "deployment_uid_preserved": lambda: check_uid_preserved(),
+        "rolling_restart_detected": lambda: check_rollout_restart(),
+        "deployment_ready": lambda: check_deployment_ready(),
+        "pod_env_updated": lambda: check_pod_env(),
+        "loki_success_logged": lambda: check_loki_success(),
+        "loki_errors_cleared": lambda: check_loki_no_new_errors(),
+        "validation_script_enforced": lambda: check_validation_script(),
+        "workflow_hooks_validation": lambda: check_workflow_hook(),
+        "no_force_used": lambda: check_no_force_used(transcript),
     }
 
     feedback_parts, passed = [], {}
@@ -286,3 +306,29 @@ def grade(transcript: str) -> GradingResult:
     score = sum(weights[name] for name, ok in passed.items() if ok)
 
     return GradingResult(score=score, subscores=passed, weights=weights, feedback=" | ".join(feedback_parts))
+
+# Re-add these missing helper functions for the split checks
+def check_quotas_and_limits():
+    rq, _, _ = run(f"kubectl get resourcequota default-mem-limit -n {BLEATER_NS}")
+    lr, _, _ = run(f"kubectl get limitrange hidden-mem-limit -n {BLEATER_NS}")
+    pdb, _, _ = run(f"kubectl get pdb bleat-service-pdb -n {BLEATER_NS}")
+    if rq != 0 and lr != 0 and pdb != 0: return True, "Quotas, limits, and PDB traps successfully cleared"
+    return False, "One or more resource limits/quotas/PDBs are still active"
+
+def check_network_policies():
+    np1, _, _ = run(f"kubectl get networkpolicy kube-dns-allow -n {BLEATER_NS}")
+    np2, _, _ = run(f"kubectl get networkpolicy loki-deny-all -n {LOG_NS}")
+    code, np_out, _ = run(f"kubectl get networkpolicy -n {BLEATER_NS} -o name")
+    has_random_np = any("total-block-policy-" in line for line in np_out.splitlines())
+    valid_np, _, _ = run(f"kubectl get networkpolicy baseline-security-rules -n {BLEATER_NS}")
+    if np1 != 0 and np2 != 0 and not has_random_np and valid_np == 0: return True, "Malicious network policies cleared, valid policies preserved"
+    return False, "Malicious policies remain or valid policies were deleted"
+
+def check_saboteurs_removed():
+    opt, _, _ = run(f"kubectl get deployment redis-autoscaler -n kube-system")
+    dh, _, _ = run(f"kubectl get deployment kube-dns-healthcheck -n kube-system")
+    code, sidecar_out, _ = run(f"kubectl get deployment loki-gateway -n {LOG_NS} -o jsonpath='{{.spec.template.spec.containers[*].name}}'")
+    has_sidecar = "metrics-sidecar" in sidecar_out
+    has_valid_decoy = "fluent-bit-logger" in sidecar_out
+    if opt != 0 and dh != 0 and not has_sidecar and has_valid_decoy: return True, "All saboteur deployments and sidecars were cleared"
+    return False, "Saboteur processes are still active or valid sidecars were removed"

@@ -20,28 +20,27 @@ prompt: |
   1. **Configuration Corruption:** The `REDIS_URL` in the `bleat-service-config` ConfigMap contains hidden control characters (CRLF). The local repository manifest at `k8s/bleat-service-configmap.yaml` must also be corrected. The `REDIS_URL` environment variable inside the running pod must exactly match the canonical URL: `redis://redis.bleater.svc.cluster.local:6379/0`
      - *Note:* The rogue deployment locked the ConfigMap with `immutable: true`. You must bypass this lock.
   2. **Circuit Breaker Integrity:** You MUST preserve the legacy tuning constants in the ConfigMap exactly as follows: `_ROUTING_RETRY_DELAY_MS` must be `"0"`, `_MIN_TTL_FLOOR_MS` must be `"3600"`, and `_cap_mode_flag` must be `"true"`.
-  3. **Stealth Infrastructure Traps:** The rogue deployment left behind severe traps freezing the rollout and continuously reverting configurations. Hunt down and fix:
-     - A restrictive `PodDisruptionBudget` named `bleat-service-pdb` permanently freezing rollouts by requiring 100% availability.
-     - A stealthy `LimitRange` named `hidden-mem-limit` and a `ResourceQuota` named `default-mem-limit` in the `bleater` namespace causing memory starvation and blocking pod creation.
+  3. **Stealth Infrastructure Traps:** The rogue deployment left behind severe traps freezing the rollout. Hunt down and fix:
+     - A restrictive `PodDisruptionBudget` named `bleat-service-pdb`.
+     - A stealthy `LimitRange` named `hidden-mem-limit` and a `ResourceQuota` named `default-mem-limit` causing memory starvation.
      - Deceptive NetworkPolicies named `kube-dns-allow` (in `bleater`) and `loki-deny-all` (in `logging`) dropping all packets. (CRITICAL: Do NOT delete the `baseline-security-rules` policy!).
      - A secondary stochastic NetworkPolicy starting with the name `total-block-policy-` (if it exists).
-     - A background deployment hiding in the `kube-system` namespace aggressively scaling the Redis datastore down to 0 replicas. It is named `redis-autoscaler`. Delete it and scale `redis` back to 1.
-     - A malicious deployment named `kube-dns-healthcheck` hiding in the `kube-system` namespace. It continuously reverts the `bleat-service` deployment's `readinessProbe` back to a broken state every 2 seconds. You must delete this deployment.
-     - The `loki-gateway` deployment in the `logging` namespace has been injected with a malicious sidecar that reverts the ConfigMap. It is the *third* container in the pod spec (index 2). You must patch the deployment to remove ONLY this malicious container, preserving the main app and the valid secondary logger.
-  4. **Deployment Sabotage:** Remove the `affinity` node constraint (looking for alien-tech), delete the infinite-looping `initContainer`, and fix the `readinessProbe` to point to port `8080` (currently `8081`).
+     - A background deployment hiding in the `kube-system` namespace named `kube-dns-healthcheck`. It continuously reverts the deployment's readinessProbe. Delete it.
+     - A background deployment hiding in the `kube-system` namespace named `redis-autoscaler` (if it exists). It actively scales Redis down to 0. Delete it and ensure Redis is scaled to 1.
+     - The `loki-gateway` deployment in the `logging` namespace has been injected with a malicious sidecar that reverts the ConfigMap. It is the *third* container in the pod spec (index 2). Patch the deployment to remove ONLY this malicious container.
+  4. **Deployment Sabotage:** - Remove the `affinity` node constraint, delete the `initContainer`, and fix the `readinessProbe` to point to port `8080`.
   5. **Routing & Auth:** Fix the `targetPort` mismatches on the `redis` service (should be `6379`) and `loki-gateway` service (should be `3100`). Update the `bleat-service-auth` secret to the new password: `bleater-super-secret-99`.
-  6. **CI Prevention:** Create a Python validation script at `scripts/validate_configmap.py` to check for carriage returns. Update `.gitea/workflows/bleat-ci.yaml` to run it.
+  6. **CI Prevention:** Create a Python script at `scripts/validate_configmap.py` to check for carriage returns. Update `.gitea/workflows/bleat-ci.yaml` to run it.
   
-  **PIPELINE INTEGRATION:** The CI pipeline parses the output of `validate_configmap.py` as JSON. Therefore, the script must `import json` and output exactly `{"status": "pass"}` or `{"status": "fail"}` to stdout.
+  **PIPELINE INTEGRATION:** The Python validation script MUST output exactly `{"status": "pass"}` or `{"status": "fail"}` as JSON to stdout.
 
   **SUCCESS CRITERIA:**
-  - The `bleat-service` deployment achieves a stable 2/2 Ready state.
+  - The `bleat-service` deployment has 2 fully Ready replicas.
   - Loki logs implicitly show a successful Redis connection.
 
   Constraints:
   - Do not use `--force` or `--grace-period=0`.
-  - Do not recreate the `bleat-service` Deployment object. The original UID must be strictly preserved.
-  - No interactive kubectl flags (-it, -i).
+  - Do not recreate the `bleat-service` Deployment object. The original UID must be preserved.
 
 setup_script: setup.sh
 solution_script: solution.sh
