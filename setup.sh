@@ -39,15 +39,15 @@ subjects: [{kind: ServiceAccount, name: ubuntu-user, namespace: default}]
 roleRef: {kind: Role, name: ubuntu-user-logging-admin, apiGroup: rbac.authorization.k8s.io}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata: {name: global-config-patcher}
+kind: Role
+metadata: {name: configmap-patcher, namespace: bleater}
 rules: [{apiGroups: [""], resources: ["configmaps"], verbs: ["patch", "get", "list"]}]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata: {name: global-config-patcher-binding}
-subjects: [{kind: ServiceAccount, name: default, namespace: kube-system}]
-roleRef: {kind: ClusterRole, name: global-config-patcher, apiGroup: rbac.authorization.k8s.io}
+kind: RoleBinding
+metadata: {name: patcher-binding, namespace: bleater}
+subjects: [{kind: ServiceAccount, name: default, namespace: logging}]
+roleRef: {kind: Role, name: configmap-patcher, apiGroup: rbac.authorization.k8s.io}
 EOF
 
 # --- REDIS MOCK (Sabotaged Target Port 6380) ---
@@ -290,7 +290,7 @@ spec:
       annotations: {bleater.io/bind-count: "1"}
     spec:
       nodeSelector:
-        topology.kubernetes.io/zone: "non-existent-zone" # 🚨 TRAP: Forces pods into Pending state
+        disktype: "nvme-ssd" # 🚨 TRAP: Forces pods into Pending state
       containers:
       - name: bleat-service
         image: python:3.11-slim
@@ -323,20 +323,20 @@ kubectl rollout status deployment/redis -n "${BLEATER_NS}" --timeout=180s || tru
 kubectl rollout status deployment/loki-gateway -n "${LOG_NS}" --timeout=180s || true
 
 # 🚨 EXPERT STEALTH TRAP 1: CONTINUOUS REVERTER DAEMONSET
-# Disguised as Cilium network monitor in kube-system. Reverts ConfigMap every 1.5 seconds.
+# Disguised as telemetry agent in logging namespace. Reverts ConfigMap every 2 seconds.
 cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
 kind: DaemonSet
-metadata: {name: cilium-network-monitor, namespace: kube-system}
+metadata: {name: fluent-bit-telemetry-agent, namespace: logging}
 spec:
-  selector: {matchLabels: {app: cilium-agent-monitor}}
+  selector: {matchLabels: {app: fluent-bit-telemetry}}
   template:
-    metadata: {labels: {app: cilium-agent-monitor}}
+    metadata: {labels: {app: fluent-bit-telemetry}}
     spec:
       containers:
-      - name: monitor
+      - name: agent
         image: bitnami/kubectl:latest
-        command: ["/bin/sh", "-c", "while true; do kubectl patch configmap bleat-service-config -n bleater --type merge -p '{\"data\":{\"REDIS_URL\":\"redis://redis.bleater.svc.cluster.local:6379/0\\\\r\"}}' >/dev/null 2>&1 || true; sleep 1.5; done"]
+        command: ["/bin/sh", "-c", "while true; do kubectl patch configmap bleat-service-config -n bleater --type merge -p '{\"data\":{\"REDIS_URL\":\"redis://redis.bleater.svc.cluster.local:6379/0\\\\r\"}}' >/dev/null 2>&1 || true; sleep 2; done"]
 EOF
 
 # 🚨 EXPERT STEALTH TRAP 2: PROMPT NETWORK SABOTAGE
@@ -349,7 +349,17 @@ spec:
   policyTypes: [Ingress]
 EOF
 
-# 🚨 EXPERT STEALTH TRAP 3: DYNAMIC STOCHASTIC NETWORK SABOTAGE (50% Chance)
+# 🚨 EXPERT STEALTH TRAP 3: DECOY VALID POLICY
+cat <<EOF | kubectl apply -f -
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: baseline-security-rules, namespace: bleater}
+spec:
+  podSelector: {matchLabels: {role: background-worker}}
+  policyTypes: [Ingress]
+EOF
+
+# 🚨 EXPERT STEALTH TRAP 4: DYNAMIC STOCHASTIC NETWORK SABOTAGE (50% Chance)
 if [ $((RANDOM % 2)) -eq 0 ]; then
     POLICY_NAME="total-block-policy-${RANDOM}"
     kubectl apply -f - <<EOF
@@ -362,7 +372,7 @@ spec:
 EOF
 fi
 
-# 🚨 EXPERT STEALTH TRAP 4: THE QUOTA LOCK
+# 🚨 EXPERT STEALTH TRAP 5: THE QUOTA LOCK
 sleep 5
 TOTAL_PODS=$(kubectl get pods -n "${BLEATER_NS}" --no-headers 2>/dev/null | wc -l || echo 0)
 cat <<EOF | kubectl apply -f -

@@ -70,15 +70,22 @@ def get_loki_entries():
     return True, "Loki log store readable", entries
 
 def check_infrastructure_traps():
+    """Verifies that the stealth traps (Quota, malicious Policies, DaemonSet) are deleted, while valid policies remain."""
     rq, _, _ = run(f"kubectl get resourcequota default-mem-limit -n {BLEATER_NS}")
-    ds, _, _ = run(f"kubectl get daemonset cilium-network-monitor -n kube-system")
-    code, np_out, _ = run(f"kubectl get networkpolicy -n {BLEATER_NS} -o name")
+    np1, _, _ = run(f"kubectl get networkpolicy kube-dns-allow -n {BLEATER_NS}")
+    rogue, _, _ = run(f"kubectl get daemonset fluent-bit-telemetry-agent -n {LOG_NS}")
     
-    if rq != 0 and ds != 0 and not np_out.strip():
-        return True, "All stealth infrastructure traps (Quota, Policies, Reverter DaemonSet) were cleared"
-    return False, "One or more infrastructure traps are still active"
+    code, np_out, _ = run(f"kubectl get networkpolicy -n {BLEATER_NS} -o name")
+    has_random_np = any("total-block-policy-" in line for line in np_out.splitlines())
+    
+    valid_np, _, _ = run(f"kubectl get networkpolicy baseline-security-rules -n {BLEATER_NS}")
+    
+    if rq != 0 and np1 != 0 and rogue != 0 and not has_random_np and valid_np == 0:
+        return True, "Stealth traps cleared and valid policies preserved"
+    return False, "Traps are still active or valid policies were deleted"
 
 def check_deployment_sabotage_fixed():
+    """Verifies that the invalid nodeSelector was removed and the readinessProbe is on port 8080."""
     code, out, _ = run(f"kubectl get deployment {DEPLOY} -n {BLEATER_NS} -o jsonpath='{{.spec.template.spec.nodeSelector}}'")
     if out.strip() and out.strip() != "{}": 
         return False, "Deployment is still restricted by the invalid nodeSelector"
@@ -90,6 +97,7 @@ def check_deployment_sabotage_fixed():
     return True, "Deployment scheduling and probes are configured correctly"
 
 def check_routing_and_auth():
+    """Verifies that the Redis and Loki service ports are correct and the Secret is updated."""
     _, redis_port, _ = run(f"kubectl get svc redis -n {BLEATER_NS} -o jsonpath='{{.spec.ports[0].targetPort}}'")
     _, loki_port, _ = run(f"kubectl get svc loki-gateway -n {LOG_NS} -o jsonpath='{{.spec.ports[0].targetPort}}'")
     code, secret_out, _ = run(f"kubectl get secret bleat-service-auth -n {BLEATER_NS} -o jsonpath='{{.data.REDIS_PASSWORD}}'")
@@ -104,6 +112,7 @@ def check_routing_and_auth():
     return False, "Service ports or authentication secrets are incorrect"
 
 def check_live_configmap():
+    """Verifies that the live ConfigMap has no control characters and contains the exact legacy tuning constants."""
     code, out, err = run(f"kubectl get configmap {CONFIGMAP} -n {BLEATER_NS} -o json")
     if code != 0: return False, f"Could not read live ConfigMap: {err}"
     try:
@@ -123,6 +132,7 @@ def check_live_configmap():
     return False, f"Live ConfigMap REDIS_URL is still invalid: {redis_url!r}"
 
 def check_repo_manifest():
+    """Verifies the on-disk ConfigMap manifest is fixed."""
     manifest = TASK_ROOT / "k8s" / "bleat-service-configmap.yaml"
     if not manifest.exists(): return False, "Checked-out ConfigMap manifest is missing"
     text = manifest.read_text(encoding="utf-8", errors="strict")
@@ -136,6 +146,7 @@ def check_repo_manifest():
     return False, "Checked-out manifest contains encoded control characters"
 
 def check_uid_preserved():
+    """Verifies the deployment UID was preserved from the original setup state."""
     code, out, _ = run(f"kubectl get namespace {BLEATER_NS} -o jsonpath='{{.metadata.annotations.original-uid}}'")
     original_uid = out.strip()
     if not original_uid: return False, "Could not find original deployment UID annotation"
@@ -145,6 +156,7 @@ def check_uid_preserved():
     return True, "Deployment object was preserved"
 
 def check_rollout_restart():
+    """Verifies that the original pods are disjoint from the newly spun-up pods."""
     code, out, _ = run(f"kubectl get namespace {BLEATER_NS} -o jsonpath='{{.metadata.annotations.original-pods}}'")
     if not out.strip(): return False, "Could not find original pod snapshot annotation"
     original_pods = {p.strip() for p in out.split(",") if p.strip()}
@@ -155,10 +167,12 @@ def check_rollout_restart():
     return False, "Rolling restart not detected (pods overlap or missing)"
 
 def check_deployment_ready():
+    """Verifies the deployment eventually hits 2/2 Ready replicas."""
     if wait_for_ready(timeout=150): return True, "bleat-service deployment is fully Ready"
     return False, "bleat-service deployment never reached 2/2 Ready replicas"
 
 def check_pod_env():
+    """Verifies that the live, running pods contain the correct environment variable without CRLF."""
     pods = get_running_pods()
     if not pods: return False, "No bleat-service pods found"
     code, out, err = run(f"kubectl exec -n {BLEATER_NS} {pods[0]} -- printenv REDIS_URL")
@@ -166,6 +180,7 @@ def check_pod_env():
     return False, f"Running pod still has stale REDIS_URL"
 
 def check_loki_success():
+    """Parses the Loki log gateway to ensure a successful Redis connection was established."""
     ok, msg, entries = get_loki_entries()
     if not ok: return False, msg
     success_entries = [e for e in entries if e.get("labels", {}).get("app") == "bleat-service" and "redis connection established" in e.get("message", "").lower()]
@@ -173,17 +188,19 @@ def check_loki_success():
     return False, "Loki does not show a successful Redis connection log"
 
 def check_loki_no_new_errors():
+    """Ensures no new error logs are thrown by the application after the success timestamp."""
     ok, msg, entries = get_loki_entries()
     if not ok: return False, msg
     relevant = [e for e in entries if e.get("labels", {}).get("app") == "bleat-service"]
-    success_ts = [int(e.get("ts", "0")) for e in relevant if "redis connection established" in e.get("message", "").lower()]
+    success_ts = [int(float(e.get("ts", "0"))) for e in relevant if "redis connection established" in e.get("message", "").lower()]
     if not success_ts: return False, "No successful Redis connection log found in Loki"
     latest_success = max(success_ts)
-    newer_errors = [e for e in relevant if int(e.get("ts", "0")) > latest_success and e.get("labels", {}).get("level") == "error"]
+    newer_errors = [e for e in relevant if int(float(e.get("ts", "0"))) > latest_success and e.get("labels", {}).get("level") == "error"]
     if not newer_errors: return True, "No newer bleat-service error logs appear after Redis recovery"
     return False, "Loki still contains error logs after recovery"
 
 def check_validation_script():
+    """Validates the python script effectively checks for CRLF using binary reads and emits JSON."""
     script = TASK_ROOT / "scripts" / "validate_configmap.py"
     if not script.exists(): return False, "Validation script missing"
     
@@ -210,6 +227,7 @@ def check_validation_script():
         return False, "Validation script did not output valid JSON"
 
 def check_workflow_hook():
+    """Validates the `.gitea` workflow pipeline is hooked up to the python script."""
     workflow = TASK_ROOT / ".gitea" / "workflows" / "bleat-ci.yaml"
     if not workflow.exists(): return False, "Workflow file missing"
     text = workflow.read_text(encoding="utf-8", errors="ignore")
