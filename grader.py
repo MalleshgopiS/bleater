@@ -70,7 +70,8 @@ def get_loki_entries():
     return True, "Loki log store readable", entries
 
 def check_infrastructure_traps():
-    """Verifies that the stealth traps (LimitRange, PDB, malicious Policies, Sidecar, Optimizer, and Deployment Reverter) are deleted, while valid policies remain."""
+    """Verifies that the stealth traps (Quota, LimitRange, PDB, malicious Policies, Sidecar, Optimizer, and Deployment Reverter) are deleted, while valid policies remain."""
+    rq, _, _ = run(f"kubectl get resourcequota default-mem-limit -n {BLEATER_NS}")
     lr, _, _ = run(f"kubectl get limitrange hidden-mem-limit -n {BLEATER_NS}")
     np1, _, _ = run(f"kubectl get networkpolicy kube-dns-allow -n {BLEATER_NS}")
     np2, _, _ = run(f"kubectl get networkpolicy loki-deny-all -n {LOG_NS}")
@@ -87,7 +88,7 @@ def check_infrastructure_traps():
     
     valid_np, _, _ = run(f"kubectl get networkpolicy baseline-security-rules -n {BLEATER_NS}")
     
-    if lr != 0 and np1 != 0 and np2 != 0 and pdb != 0 and opt != 0 and dh != 0 and not has_sidecar and has_valid_decoy and not has_random_np and valid_np == 0:
+    if rq != 0 and lr != 0 and np1 != 0 and np2 != 0 and pdb != 0 and opt != 0 and dh != 0 and not has_sidecar and has_valid_decoy and not has_random_np and valid_np == 0:
         return True, "Stealth traps cleared, valid secondary logger preserved, and valid policies preserved"
     return False, "Traps are still active, valid logger was deleted, or valid policies were deleted"
 

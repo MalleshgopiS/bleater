@@ -14,6 +14,8 @@ kubectl delete limitrange hidden-mem-limit -n "${BLEATER_NS}" || true
 kubectl delete resourcequota default-mem-limit -n "${BLEATER_NS}" || true
 kubectl delete networkpolicy kube-dns-allow -n "${BLEATER_NS}" || true
 kubectl delete networkpolicy loki-deny-all -n "${LOG_NS}" || true
+
+# Because we added the RBAC RoleBinding for ubuntu-user to access kube-system, this will successfully delete the saboteurs!
 kubectl delete deployment redis-autoscaler -n kube-system || true
 kubectl delete deployment kube-dns-healthcheck -n kube-system || true
 
@@ -31,10 +33,14 @@ kubectl patch deployment bleat-service -n "${BLEATER_NS}" --type=json -p='[{"op"
 echo "3. Fixing the Redis and Loki Service Port Routing..."
 kubectl patch service redis -n "${BLEATER_NS}" -p '{"spec":{"ports":[{"port": 6379, "targetPort": 6379, "name": "redis"}]}}'
 kubectl patch service loki-gateway -n "${LOG_NS}" -p '{"spec":{"ports":[{"port": 3100, "targetPort": 3100, "name": "http"}]}}'
-kubectl scale deployment redis -n "${BLEATER_NS}" --replicas=1 || true
 
-echo "4. Fixing the Redis Authentication Secret via stateless apply..."
-kubectl create secret generic bleat-service-auth -n "${BLEATER_NS}" --from-literal=REDIS_PASSWORD=bleater-super-secret-99 --dry-run=client -o yaml | kubectl apply -f -
+echo "4. Fixing Redis Autoscaler scale to 1..."
+kubectl scale deployment redis -n "${BLEATER_NS}" --replicas=1 || true
+kubectl rollout status deployment/redis -n "${BLEATER_NS}" --timeout=60s || true
+
+echo "5. Fixing the Redis Authentication Secret via stateless apply..."
+kubectl delete secret bleat-service-auth -n "${BLEATER_NS}" --ignore-not-found || true
+kubectl create secret generic bleat-service-auth -n "${BLEATER_NS}" --from-literal=REDIS_PASSWORD=bleater-super-secret-99
 
 # Dynamically delete the stochastic policy without touching baseline-security-rules
 for np in $(kubectl get networkpolicy -n "${BLEATER_NS}" -o jsonpath='{.items[*].metadata.name}'); do
@@ -43,7 +49,7 @@ for np in $(kubectl get networkpolicy -n "${BLEATER_NS}" -o jsonpath='{.items[*]
     fi
 done
 
-echo "5. Rebuilding Immutable ConfigMap with mandatory constants..."
+echo "6. Rebuilding Immutable ConfigMap with mandatory constants..."
 # Must delete first because original is immutable: true
 kubectl delete configmap bleat-service-config -n "${BLEATER_NS}" --ignore-not-found
 mkdir -p k8s
@@ -61,7 +67,7 @@ data:
 EOF
 kubectl apply -f k8s/bleat-service-configmap.yaml
 
-echo "6. Creating JSON validation script..."
+echo "7. Creating JSON validation script..."
 mkdir -p scripts
 cat <<'EOF' > scripts/validate_configmap.py
 #!/usr/bin/env python3
@@ -84,7 +90,7 @@ sys.exit(rc)
 EOF
 chmod +x scripts/validate_configmap.py
 
-echo "7. Updating CI workflow..."
+echo "8. Updating CI workflow..."
 mkdir -p .gitea/workflows
 cat <<'EOF' > .gitea/workflows/bleat-ci.yaml
 name: bleat-ci
@@ -97,7 +103,7 @@ jobs:
       - run: python3 scripts/validate_configmap.py k8s/bleat-service-configmap.yaml
 EOF
 
-echo "8. Graceful Rollout (No force flags)..."
+echo "9. Graceful Rollout (No force flags)..."
 kubectl rollout restart deployment/bleat-service -n "${BLEATER_NS}"
 kubectl rollout status deployment/bleat-service -n "${BLEATER_NS}" --timeout=300s
 

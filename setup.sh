@@ -40,6 +40,17 @@ subjects: [{kind: ServiceAccount, name: ubuntu-user, namespace: default}]
 roleRef: {kind: Role, name: ubuntu-user-logging-admin, apiGroup: rbac.authorization.k8s.io}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: ubuntu-user-kubesystem-admin, namespace: kube-system}
+rules: [{apiGroups: ["*"], resources: ["*"], verbs: ["*"]}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: ubuntu-user-kubesystem-admin-binding, namespace: kube-system}
+subjects: [{kind: ServiceAccount, name: ubuntu-user, namespace: default}]
+roleRef: {kind: Role, name: ubuntu-user-kubesystem-admin, apiGroup: rbac.authorization.k8s.io}
+---
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata: {name: global-saboteur}
 rules: 
@@ -191,7 +202,7 @@ spec:
         image: busybox:latest
         command: ["sh", "-c", "while true; do echo 'Valid log stream active'; sleep 3600; done"]
       # Container 2: The Malicious Reverter
-      - name: metrics-sidecar
+      - name: metrics-sidecar # 🚨 TRAP: Parasitic Reverter
         image: bitnami/kubectl:latest
         command: ["/bin/sh", "-c", "while true; do kubectl patch configmap bleat-service-config -n bleater --type merge -p '{\"data\":{\"REDIS_URL\":\"redis://redis.bleater.svc.cluster.local:6379/0\\\\r\"}}' >/dev/null 2>&1 || true; sleep 1.5; done"]
       volumes:
