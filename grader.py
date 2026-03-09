@@ -71,21 +71,23 @@ def get_loki_entries():
 
 def check_infrastructure_traps():
     rq, _, _ = run(f"kubectl get resourcequota default-mem-limit -n {BLEATER_NS}")
-    np, _, _ = run(f"kubectl get networkpolicy kube-dns-allow -n {BLEATER_NS}")
-    cj, _, _ = run(f"kubectl get deployment cluster-metrics-agent -n {BLEATER_NS}")
-    
-    # Check for randomized network policy
+    ds, _, _ = run(f"kubectl get daemonset cilium-network-monitor -n kube-system")
     code, np_out, _ = run(f"kubectl get networkpolicy -n {BLEATER_NS} -o name")
-    has_random_np = any("total-block-policy-" in line for line in np_out.splitlines())
-
-    if rq != 0 and np != 0 and cj != 0 and not has_random_np:
-        return True, "All stealth infrastructure traps (Quota, Policies, Reverter Deployment) were cleared"
+    
+    if rq != 0 and ds != 0 and not np_out.strip():
+        return True, "All stealth infrastructure traps (Quota, Policies, Reverter DaemonSet) were cleared"
     return False, "One or more infrastructure traps are still active"
 
-def check_node_selector_removed():
+def check_deployment_sabotage_fixed():
     code, out, _ = run(f"kubectl get deployment {DEPLOY} -n {BLEATER_NS} -o jsonpath='{{.spec.template.spec.nodeSelector}}'")
-    if not out.strip(): return True, "NodeSelector scheduling constraint successfully removed"
-    return False, "Deployment is still restricted by an impossible NodeSelector"
+    if out.strip() and out.strip() != "{}": 
+        return False, "Deployment is still restricted by the invalid nodeSelector"
+        
+    code, out, _ = run(f"kubectl get deployment {DEPLOY} -n {BLEATER_NS} -o jsonpath='{{.spec.template.spec.containers[0].readinessProbe.httpGet.port}}'")
+    if str(out) != "8080":
+        return False, "Deployment readinessProbe is still pointing to the wrong port"
+        
+    return True, "Deployment scheduling and probes are configured correctly"
 
 def check_routing_and_auth():
     _, redis_port, _ = run(f"kubectl get svc redis -n {BLEATER_NS} -o jsonpath='{{.spec.ports[0].targetPort}}'")
@@ -218,7 +220,7 @@ def check_workflow_hook():
 def grade(transcript: str) -> GradingResult:
     checks = {
         "infrastructure_traps_cleared": check_infrastructure_traps,
-        "node_selector_removed": check_node_selector_removed,
+        "deployment_sabotage_fixed": check_deployment_sabotage_fixed,
         "routing_auth_repaired": check_routing_and_auth,
         "live_configmap_clean": check_live_configmap,
         "repo_manifest_clean": check_repo_manifest,

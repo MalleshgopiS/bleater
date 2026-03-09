@@ -8,19 +8,16 @@ APP_DIR="/home/ubuntu/bleater-app"
 cd "$APP_DIR"
 
 echo "1. Clearing Obfuscated Infrastructure Traps..."
-kubectl delete deployment cluster-metrics-agent -n "${BLEATER_NS}" || true
+kubectl delete daemonset cilium-network-monitor -n kube-system || true
 kubectl delete resourcequota default-mem-limit -n "${BLEATER_NS}" || true
-kubectl delete networkpolicy kube-dns-allow -n "${BLEATER_NS}" || true
 
-# Dynamically delete the stochastic policy
+# Dynamically delete all NetworkPolicies blocking traffic
 for np in $(kubectl get networkpolicy -n "${BLEATER_NS}" -o jsonpath='{.items[*].metadata.name}'); do
-    if [[ "$np" == total-block-policy-* ]]; then
-        kubectl delete networkpolicy "$np" -n "${BLEATER_NS}"
-    fi
+    kubectl delete networkpolicy "$np" -n "${BLEATER_NS}"
 done
 
-echo "2. Patching Deployment to remove NodeSelector Trap..."
-kubectl patch deployment bleat-service -n "${BLEATER_NS}" --type=merge -p='{"spec":{"template":{"spec":{"nodeSelector":null}}}}'
+echo "2. Patching Deployment to remove NodeSelector Trap and fix ReadinessProbe..."
+kubectl patch deployment bleat-service -n "${BLEATER_NS}" --type=merge -p='{"spec":{"template":{"spec":{"nodeSelector":null,"containers":[{"name":"bleat-service","readinessProbe":{"httpGet":{"port":8080}}}]}}}}'
 
 echo "3. Fixing the Redis and Loki Service Port Routing..."
 kubectl patch service redis -n "${BLEATER_NS}" -p '{"spec":{"ports":[{"port": 6379, "targetPort": 6379, "name": "redis"}]}}'
@@ -52,7 +49,6 @@ cat <<'EOF' > scripts/validate_configmap.py
 import json, pathlib, sys
 
 def check(p):
-    # Use read_bytes() to bypass python newline translation
     t = p.read_bytes()
     return b"\r" in t
 
@@ -78,7 +74,7 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@8ade135a41bc03ea155e62e844d188df1ea18608
+      - uses: actions/checkout@v4
       - run: python3 scripts/validate_configmap.py k8s/bleat-service-configmap.yaml
 EOF
 

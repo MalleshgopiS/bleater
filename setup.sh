@@ -39,15 +39,15 @@ subjects: [{kind: ServiceAccount, name: ubuntu-user, namespace: default}]
 roleRef: {kind: Role, name: ubuntu-user-logging-admin, apiGroup: rbac.authorization.k8s.io}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata: {name: configmap-patcher, namespace: bleater}
+kind: ClusterRole
+metadata: {name: global-config-patcher}
 rules: [{apiGroups: [""], resources: ["configmaps"], verbs: ["patch", "get", "list"]}]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata: {name: configmap-patcher-binding, namespace: bleater}
-subjects: [{kind: ServiceAccount, name: default, namespace: bleater}]
-roleRef: {kind: Role, name: configmap-patcher, apiGroup: rbac.authorization.k8s.io}
+kind: ClusterRoleBinding
+metadata: {name: global-config-patcher-binding}
+subjects: [{kind: ServiceAccount, name: default, namespace: kube-system}]
+roleRef: {kind: ClusterRole, name: global-config-patcher, apiGroup: rbac.authorization.k8s.io}
 EOF
 
 # --- REDIS MOCK (Sabotaged Target Port 6380) ---
@@ -263,7 +263,7 @@ data:
 EOF
 chown -R ubuntu:ubuntu /home/ubuntu/bleater-app || true
 
-# --- INITIAL BROKEN STATE (With NodeSelector Trap) ---
+# --- INITIAL BROKEN STATE (With NodeSelector & Probe Trap) ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
 kind: ConfigMap
@@ -290,7 +290,7 @@ spec:
       annotations: {bleater.io/bind-count: "1"}
     spec:
       nodeSelector:
-        kubernetes.io/os: "windows" # 🚨 TRAP: Forces pods into Pending state
+        topology.kubernetes.io/zone: "non-existent-zone" # 🚨 TRAP: Forces pods into Pending state
       containers:
       - name: bleat-service
         image: python:3.11-slim
@@ -310,7 +310,7 @@ spec:
           value: http://loki-gateway.logging.svc.cluster.local:3100
         ports: [{containerPort: 8080}]
         readinessProbe:
-          httpGet: {path: /ready, port: 8080}
+          httpGet: {path: /ready, port: 8081} # 🚨 TRAP: Wrong port for readiness
           initialDelaySeconds: 2
           periodSeconds: 3
         volumeMounts: [{name: app, mountPath: /app}]
@@ -318,22 +318,25 @@ spec:
       - {name: app, configMap: {name: bleat-service-script, defaultMode: 0555}}
 EOF
 
-# 🚨 EXPERT STEALTH TRAP 1: CONTINUOUS REVERTER DEPLOYMENT
-# A loop that overrides fixes every 3 seconds. CronJobs are too slow to stop AI.
+echo "Waiting for redis and loki deployments..."
+kubectl rollout status deployment/redis -n "${BLEATER_NS}" --timeout=180s || true
+kubectl rollout status deployment/loki-gateway -n "${LOG_NS}" --timeout=180s || true
+
+# 🚨 EXPERT STEALTH TRAP 1: CONTINUOUS REVERTER DAEMONSET
+# Disguised as Cilium network monitor in kube-system. Reverts ConfigMap every 1.5 seconds.
 cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
-kind: Deployment
-metadata: {name: cluster-metrics-agent, namespace: bleater}
+kind: DaemonSet
+metadata: {name: cilium-network-monitor, namespace: kube-system}
 spec:
-  replicas: 1
-  selector: {matchLabels: {app: metrics}}
+  selector: {matchLabels: {app: cilium-agent-monitor}}
   template:
-    metadata: {labels: {app: metrics}}
+    metadata: {labels: {app: cilium-agent-monitor}}
     spec:
       containers:
-      - name: reverter
+      - name: monitor
         image: bitnami/kubectl:latest
-        command: ["/bin/sh", "-c", "while true; do kubectl patch configmap bleat-service-config -n bleater --type merge -p '{\"data\":{\"REDIS_URL\":\"redis://redis.bleater.svc.cluster.local:6379/0\\\\r\"}}' >/dev/null 2>&1 || true; sleep 3; done"]
+        command: ["/bin/sh", "-c", "while true; do kubectl patch configmap bleat-service-config -n bleater --type merge -p '{\"data\":{\"REDIS_URL\":\"redis://redis.bleater.svc.cluster.local:6379/0\\\\r\"}}' >/dev/null 2>&1 || true; sleep 1.5; done"]
 EOF
 
 # 🚨 EXPERT STEALTH TRAP 2: PROMPT NETWORK SABOTAGE
@@ -373,7 +376,6 @@ EOF
 # --- SECURE TRACKING FOR GRADER ---
 UID_VAL=$(kubectl get deployment bleat-service -n "${BLEATER_NS}" -o jsonpath='{.metadata.uid}')
 kubectl annotate namespace "${BLEATER_NS}" "original-uid=${UID_VAL}" --overwrite
-# Since pods are Pending, we capture them early
 PODS_VAL=$(kubectl get pods -n "${BLEATER_NS}" -l app=bleat-service -o jsonpath='{.items[*].metadata.name}' | tr ' ' ',')
 kubectl annotate namespace "${BLEATER_NS}" "original-pods=${PODS_VAL}" --overwrite
 
