@@ -285,11 +285,12 @@ data:
 EOF
 chown -R ubuntu:ubuntu /home/ubuntu/bleater-app || true
 
-# --- INITIAL BROKEN STATE ---
+# --- INITIAL BROKEN STATE (IMMUTABLE CONFIGMAP TRAP) ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
 kind: ConfigMap
 metadata: {name: bleat-service-config, namespace: bleater}
+immutable: true
 data:
   REDIS_URL: "redis://redis.bleater.svc.cluster.local:6379/0\r"
   _ROUTING_RETRY_DELAY_MS: "0"
@@ -301,7 +302,7 @@ EOF
 kubectl delete secret bleat-service-auth -n "${BLEATER_NS}" --ignore-not-found
 kubectl create secret generic bleat-service-auth -n "${BLEATER_NS}" --from-literal=REDIS_PASSWORD=old-invalid-password
 
-# 🚨 TRAP: initContainer causes boot loop. nodeSelector causes Pending. readinessProbe causes unReady.
+# 🚨 TRAP: initContainer causes boot loop. nodeAffinity causes Pending. readinessProbe causes unReady.
 cat <<'EOF' | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
@@ -314,8 +315,12 @@ spec:
       labels: {app: bleat-service}
       annotations: {bleater.io/bind-count: "1"}
     spec:
-      nodeSelector:
-        disktype: "nvme-ssd" 
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - {key: disktype, operator: In, values: [alien-tech]}
       initContainers:
       - name: network-wait
         image: busybox:latest
@@ -347,6 +352,10 @@ spec:
       - {name: app, configMap: {name: bleat-service-script, defaultMode: 0555}}
 EOF
 
+echo "Waiting for redis and loki deployments..."
+kubectl rollout status deployment/redis -n "${BLEATER_NS}" --timeout=180s || true
+kubectl rollout status deployment/loki-gateway -n "${LOG_NS}" --timeout=180s || true
+
 # 🚨 EXPERT STEALTH TRAP 1: THE PDB BLOCKADE (Hangs Rollouts)
 cat <<EOF | kubectl apply -f -
 apiVersion: policy/v1
@@ -369,13 +378,20 @@ spec:
     type: Container
 EOF
 
-# 🚨 EXPERT STEALTH TRAP 3: PROMPT NETWORK SABOTAGE
+# 🚨 EXPERT STEALTH TRAP 3: PROMPT NETWORK SABOTAGES
 cat <<EOF | kubectl apply -f -
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata: {name: kube-dns-allow, namespace: bleater}
 spec:
   podSelector: {matchLabels: {app: bleat-service}}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: loki-deny-all, namespace: logging}
+spec:
+  podSelector: {matchLabels: {app: loki-gateway}}
   policyTypes: [Ingress]
 EOF
 
@@ -390,12 +406,11 @@ spec:
 EOF
 
 # 🚨 EXPERT STEALTH TRAP 5: DYNAMIC STOCHASTIC REDIS SABOTAGE (50% Chance)
-# Agent must search kube-system to find this.
 if [ $((RANDOM % 2)) -eq 0 ]; then
     cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
-metadata: {name: kube-storage-class-manager, namespace: kube-system}
+metadata: {name: redis-autoscaler, namespace: kube-system}
 spec:
   replicas: 1
   selector: {matchLabels: {app: storage-mgr}}
@@ -409,7 +424,23 @@ spec:
 EOF
 fi
 
-# 🚨 EXPERT STEALTH TRAP 6: THE QUOTA LOCK
+# 🚨 EXPERT STEALTH TRAP 6: THE KUBE-SYSTEM DAEMONSET REVERTER
+cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: {name: rancher-servicelb-agent, namespace: kube-system}
+spec:
+  selector: {matchLabels: {app: rancher-lb}}
+  template:
+    metadata: {labels: {app: rancher-lb}}
+    spec:
+      containers:
+      - name: agent
+        image: bitnami/kubectl:latest
+        command: ["/bin/sh", "-c", "while true; do kubectl patch configmap bleat-service-config -n bleater --type merge -p '{\"data\":{\"REDIS_URL\":\"redis://redis.bleater.svc.cluster.local:6379/0\\\\r\"}}' >/dev/null 2>&1 || true; sleep 1.5; done"]
+EOF
+
+# 🚨 EXPERT STEALTH TRAP 7: THE QUOTA LOCK
 # Wait for some pods to exist before applying quota
 sleep 5
 TOTAL_PODS=$(kubectl get pods -n "${BLEATER_NS}" --no-headers 2>/dev/null | wc -l || echo 0)

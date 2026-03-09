@@ -70,11 +70,13 @@ def get_loki_entries():
     return True, "Loki log store readable", entries
 
 def check_infrastructure_traps():
-    """Verifies that the stealth traps (LimitRange, PDB, malicious Policies, Sidecar, Optimizer) are deleted, while valid policies remain."""
+    """Verifies that the stealth traps (LimitRange, PDB, malicious Policies, Sidecar, Optimizer, and DS Reverter) are deleted, while valid policies remain."""
     lr, _, _ = run(f"kubectl get limitrange hidden-mem-limit -n {BLEATER_NS}")
     np1, _, _ = run(f"kubectl get networkpolicy kube-dns-allow -n {BLEATER_NS}")
+    np2, _, _ = run(f"kubectl get networkpolicy loki-deny-all -n {LOG_NS}")
     pdb, _, _ = run(f"kubectl get pdb bleat-service-pdb -n {BLEATER_NS}")
-    opt, _, _ = run(f"kubectl get deployment kube-storage-class-manager -n kube-system")
+    opt, _, _ = run(f"kubectl get deployment redis-autoscaler -n kube-system")
+    ds, _, _ = run(f"kubectl get daemonset rancher-servicelb-agent -n kube-system")
     
     code, sidecar_out, _ = run(f"kubectl get deployment loki-gateway -n {LOG_NS} -o jsonpath='{{.spec.template.spec.containers[*].name}}'")
     has_sidecar = "metrics-sidecar" in sidecar_out
@@ -82,15 +84,15 @@ def check_infrastructure_traps():
     
     valid_np, _, _ = run(f"kubectl get networkpolicy baseline-security-rules -n {BLEATER_NS}")
     
-    if lr != 0 and np1 != 0 and pdb != 0 and opt != 0 and not has_sidecar and has_valid_decoy and valid_np == 0:
+    if lr != 0 and np1 != 0 and np2 != 0 and pdb != 0 and opt != 0 and ds != 0 and not has_sidecar and has_valid_decoy and valid_np == 0:
         return True, "Stealth traps cleared, valid secondary logger preserved, and valid policies preserved"
     return False, "Traps are still active, valid logger was deleted, or valid policies were deleted"
 
 def check_deployment_sabotage_fixed():
-    """Verifies that the invalid nodeSelector and initContainers were removed and the readinessProbe is on port 8080."""
-    code, out, _ = run(f"kubectl get deployment {DEPLOY} -n {BLEATER_NS} -o jsonpath='{{.spec.template.spec.nodeSelector}}'")
+    """Verifies that the invalid affinity and initContainers were removed and the readinessProbe is on port 8080."""
+    code, out, _ = run(f"kubectl get deployment {DEPLOY} -n {BLEATER_NS} -o jsonpath='{{.spec.template.spec.affinity}}'")
     if out.strip() and out.strip() != "{}": 
-        return False, "Deployment is still restricted by the invalid nodeSelector"
+        return False, "Deployment is still restricted by the invalid affinity constraints"
         
     code, out, _ = run(f"kubectl get deployment {DEPLOY} -n {BLEATER_NS} -o jsonpath='{{.spec.template.spec.initContainers}}'")
     if out.strip() and out.strip() != "[]": 
@@ -203,7 +205,6 @@ def check_loki_no_new_errors():
     if not ok: return False, msg
     relevant = [e for e in entries if e.get("labels", {}).get("app") == "bleat-service"]
     
-    # Safe float parsing to handle arbitrary formats
     def parse_ts(t):
         try: return float(t)
         except (ValueError, TypeError): return 0.0
