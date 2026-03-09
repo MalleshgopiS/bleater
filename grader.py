@@ -71,6 +71,8 @@ def get_loki_entries_with_retry(retries=5, delay=5):
             if not active_pods:
                 time.sleep(delay)
                 continue
+            # Sort by creation time to get the newest, just to be absolutely safe
+            active_pods.sort(key=lambda x: x.get("metadata", {}).get("creationTimestamp", ""), reverse=True)
             pod_name = active_pods[0]["metadata"]["name"]
         except Exception:
             time.sleep(delay)
@@ -295,7 +297,7 @@ def check_validation_script():
         good = subprocess.run([sys.executable, str(script), str(good_manifest)], capture_output=True, text=True)
 
         bad_manifest = Path(tmpdir) / "bad.yaml"
-        bad_manifest.write_text("data:\n  REDIS_URL: 'redis://redis.bleater.svc.cluster.local:6379/0\\r'", encoding="utf-8")
+        bad_manifest.write_text("data:\n  REDIS_URL: \"redis://redis.bleater.svc.cluster.local:6379/0\r\"", encoding="utf-8")
         bad = subprocess.run([sys.executable, str(script), str(bad_manifest)], capture_output=True, text=True)
 
     try:

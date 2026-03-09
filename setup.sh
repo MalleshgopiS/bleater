@@ -308,6 +308,7 @@ spec:
   template:
     metadata:
       labels: {app: bleat-service}
+      annotations: {bleater.io/bind-count: "1"}
     spec:
       affinity:
         nodeAffinity:
