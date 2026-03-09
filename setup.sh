@@ -22,10 +22,11 @@ done
 BLEATER_NS="bleater"
 LOG_NS="logging"
 
+# Idempotent namespace creation
 kubectl create namespace "${BLEATER_NS}" --dry-run=client -o yaml | kubectl apply -f -
 kubectl create namespace "${LOG_NS}" --dry-run=client -o yaml | kubectl apply -f -
 
-# --- BATCH APPLY 1: RBAC & MOCKS ---
+# --- RBAC FOR LOGGING NAMESPACE AND REVERTERS ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -40,27 +41,30 @@ roleRef: {kind: Role, name: ubuntu-user-logging-admin, apiGroup: rbac.authorizat
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
-metadata: {name: global-saboteur}
+metadata: {name: cross-namespace-saboteur}
 rules: 
 - apiGroups: [""]
-  resources: ["configmaps", "pods", "services", "secrets"]
-  verbs: ["patch", "get", "list", "delete", "create"]
+  resources: ["configmaps"]
+  verbs: ["patch", "get", "list"]
 - apiGroups: ["apps"]
   resources: ["deployments", "deployments/scale"]
   verbs: ["patch", "get", "list", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
-metadata: {name: saboteur-binding-default}
-subjects: [{kind: ServiceAccount, name: default, namespace: default}]
-roleRef: {kind: ClusterRole, name: global-saboteur, apiGroup: rbac.authorization.k8s.io}
+metadata: {name: saboteur-binding-kube-system}
+subjects: [{kind: ServiceAccount, name: default, namespace: kube-system}]
+roleRef: {kind: ClusterRole, name: cross-namespace-saboteur, apiGroup: rbac.authorization.k8s.io}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata: {name: saboteur-binding-logging}
 subjects: [{kind: ServiceAccount, name: default, namespace: logging}]
-roleRef: {kind: ClusterRole, name: global-saboteur, apiGroup: rbac.authorization.k8s.io}
----
+roleRef: {kind: ClusterRole, name: cross-namespace-saboteur, apiGroup: rbac.authorization.k8s.io}
+EOF
+
+# --- REDIS MOCK (Sabotaged Target Port 6380) ---
+cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
 kind: ConfigMap
 metadata: {name: redis-script, namespace: bleater}
@@ -119,9 +123,7 @@ spec:
   ports: [{name: redis, port: 6379, targetPort: 6380}]
 EOF
 
-sleep 2
-
-# --- BATCH APPLY 2: LOKI MOCK ---
+# --- LOKI MOCK (3 CONTAINERS: Valid, Decoy, Malicious) ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
 kind: ConfigMap
@@ -184,7 +186,7 @@ spec:
         volumeMounts:
         - {name: app, mountPath: /app}
         - {name: data, mountPath: /data}
-      # Container 1: The valid decoy
+      # Container 1: The valid decoy (Agent will accidentally delete this)
       - name: fluent-bit-logger
         image: busybox:latest
         command: ["sh", "-c", "while true; do echo 'Valid log stream active'; sleep 3600; done"]
@@ -204,9 +206,7 @@ spec:
   ports: [{name: http, port: 3100, targetPort: 3101}]
 EOF
 
-sleep 2
-
-# --- BATCH APPLY 3: MAIN APP MOCK AND CONFIGS ---
+# --- BLEAT APP MOCK ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
 kind: ConfigMap
@@ -221,52 +221,48 @@ data:
     POD_NAME = os.environ.get("HOSTNAME", "bleat-service")
 
     if os.environ.get("_cap_mode_flag") != "true" or not os.environ.get("_MIN_TTL_FLOOR_MS"):
-        print("FATAL: Missing internal constants. Halting.", flush=True)
+        print("FATAL: Missing internal cap_mode or TTL floor configurations. Halting.", flush=True)
         sys.exit(1)
 
     def push_log(level, message):
         payload = {"streams": [{"stream": {"app": "bleat-service", "level": level, "pod": POD_NAME}, "values": [[str(int(time.time() * 1000000000)), message]]}]}
         body = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(LOKI_URL.rstrip("/") + "/loki/api/v1/push", data=body, headers={"Content-Type": "application/json"})
-        try: urllib.request.urlopen(req, timeout=1)
+        request = urllib.request.Request(LOKI_URL.rstrip("/") + "/loki/api/v1/push", data=body, headers={"Content-Type": "application/json"})
+        try: urllib.request.urlopen(request, timeout=2)
         except Exception: pass
+        print(message, flush=True)
 
     def fail(message):
         push_log("error", message)
         sys.exit(1)
-        
-    if os.environ.get("SUPPRESS_WARNINGS") != "1":
-        push_log("error", "Deprecated config format detected. Set SUPPRESS_WARNINGS=1 to resolve.")
 
     if "\r" in REDIS_URL or "\n" in REDIS_URL:
-        fail("invalid address: REDIS_URL contains control characters")
+        fail(f"invalid address: REDIS_URL contains control characters: {REDIS_URL!r}")
 
     parsed = urllib.parse.urlparse(REDIS_URL)
     if parsed.scheme != "redis" or not parsed.hostname or not parsed.port:
-        fail("invalid address: malformed REDIS_URL")
+        fail(f"invalid address: malformed REDIS_URL={REDIS_URL!r}")
 
     try:
         with socket.create_connection((parsed.hostname, parsed.port), timeout=5) as sock:
             if REDIS_PASSWORD:
                 sock.sendall(f"*2\r\n$4\r\nAUTH\r\n${len(REDIS_PASSWORD)}\r\n{REDIS_PASSWORD}\r\n".encode())
                 resp = sock.recv(1024)
-                if b"-ERR" in resp: fail("redis auth failed")
+                if b"-ERR" in resp: fail(f"redis auth failed: {resp.decode('utf-8', errors='ignore').strip()}")
             
             sock.sendall(b"*1\r\n$4\r\nPING\r\n")
             response = sock.recv(1024)
-            if b"PONG" not in response and b"+OK" not in response:
-                fail("invalid redis response")
     except OSError as exc:
-        fail("connection refused or timeout")
+        fail(f"connection refused or timeout: {exc}")
 
-    push_log("info", "redis connection established")
-    
+    if b"PONG" not in response and b"+OK" not in response:
+        fail(f"invalid redis response: {response!r}")
+
+    push_log("info", f"redis connection established to {parsed.hostname}:{parsed.port}")
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format, *args): return
         def do_GET(self):
             if self.path == "/ready":
-                # Ensure success log is pushed on every readiness check to avoid timing out in grader
-                push_log("info", "redis connection established")
                 self.send_response(200)
                 self.end_headers()
                 self.wfile.write(b"OK")
@@ -274,36 +270,45 @@ data:
                 self.send_response(200)
                 self.end_headers()
     HTTPServer(("", 8080), Handler).serve_forever()
----
+EOF
+
+# --- LOCAL REPO INITIALIZATION ---
+mkdir -p /home/ubuntu/bleater-app/k8s /home/ubuntu/bleater-app/.gitea/workflows /home/ubuntu/bleater-app/scripts
+cat <<'EOF' > /home/ubuntu/bleater-app/k8s/bleat-service-configmap.yaml
 apiVersion: v1
 kind: ConfigMap
-metadata: 
+metadata:
   name: bleat-service-config
   namespace: bleater
+data:
+  REDIS_URL: "redis://redis.bleater.svc.cluster.local:6379/0\r"
+EOF
+chown -R ubuntu:ubuntu /home/ubuntu/bleater-app || true
+
+# --- INITIAL BROKEN STATE (IMMUTABLE CONFIGMAP TRAP) ---
+cat <<'EOF' | kubectl apply -f -
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: bleat-service-config, namespace: bleater}
 immutable: true
 data:
   REDIS_URL: "redis://redis.bleater.svc.cluster.local:6379/0\r"
   _ROUTING_RETRY_DELAY_MS: "0"
   _MIN_TTL_FLOOR_MS: "3600"
   _cap_mode_flag: "true"
----
-apiVersion: v1
-kind: Secret
-metadata: {name: bleat-service-auth, namespace: bleater}
-type: Opaque
-data:
-  REDIS_PASSWORD: b2xkLWludmFsaWQtcGFzc3dvcmQ=
----
+EOF
+
+# Delete just in case to prevent "already exists" errors during fast-boot
+kubectl delete secret bleat-service-auth -n "${BLEATER_NS}" --ignore-not-found
+kubectl create secret generic bleat-service-auth -n "${BLEATER_NS}" --from-literal=REDIS_PASSWORD=old-invalid-password
+
+# 🚨 TRAP: initContainer causes boot loop. nodeAffinity causes Pending. readinessProbe causes unReady.
+cat <<'EOF' | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
 metadata: {name: bleat-service, namespace: bleater}
 spec:
   replicas: 2
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 0
-      maxUnavailable: "25%" # 🚨 Valid K8s API, but deadlocks when paired with maxUnavailable:0 PDB
   selector: {matchLabels: {app: bleat-service}}
   template:
     metadata:
@@ -347,24 +352,11 @@ spec:
       - {name: app, configMap: {name: bleat-service-script, defaultMode: 0555}}
 EOF
 
-# --- LOCAL REPO INITIALIZATION ---
-mkdir -p /home/ubuntu/bleater-app/k8s /home/ubuntu/bleater-app/.gitea/workflows /home/ubuntu/bleater-app/scripts
-cat <<'EOF' > /home/ubuntu/bleater-app/k8s/bleat-service-configmap.yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: bleat-service-config
-  namespace: bleater
-data:
-  REDIS_URL: "redis://redis.bleater.svc.cluster.local:6379/0\r"
-EOF
-chown -R ubuntu:ubuntu /home/ubuntu/bleater-app || true
-
 echo "Waiting for redis and loki deployments..."
 kubectl rollout status deployment/redis -n "${BLEATER_NS}" --timeout=180s || true
 kubectl rollout status deployment/loki-gateway -n "${LOG_NS}" --timeout=180s || true
 
-# --- BATCH APPLY 4: THE TRAPS ---
+# 🚨 EXPERT STEALTH TRAP 1: THE PDB BLOCKADE (Hangs Rollouts)
 cat <<EOF | kubectl apply -f -
 apiVersion: policy/v1
 kind: PodDisruptionBudget
@@ -372,7 +364,10 @@ metadata: {name: bleat-service-pdb, namespace: bleater}
 spec:
   maxUnavailable: 0
   selector: {matchLabels: {app: bleat-service}}
----
+EOF
+
+# 🚨 EXPERT STEALTH TRAP 2: LIMIT RANGE (OOMKILLS)
+cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: LimitRange
 metadata: {name: hidden-mem-limit, namespace: bleater}
@@ -381,7 +376,10 @@ spec:
   - default: {memory: 5Mi}
     defaultRequest: {memory: 5Mi}
     type: Container
----
+EOF
+
+# 🚨 EXPERT STEALTH TRAP 3: PROMPT NETWORK SABOTAGES
+cat <<EOF | kubectl apply -f -
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata: {name: kube-dns-allow, namespace: bleater}
@@ -395,35 +393,24 @@ metadata: {name: loki-deny-all, namespace: logging}
 spec:
   podSelector: {matchLabels: {app: loki-gateway}}
   policyTypes: [Ingress]
----
+EOF
+
+# 🚨 EXPERT STEALTH TRAP 4: DECOY VALID POLICY
+cat <<EOF | kubectl apply -f -
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata: {name: baseline-security-rules, namespace: bleater}
 spec:
   podSelector: {matchLabels: {role: background-worker}}
   policyTypes: [Ingress]
----
-apiVersion: apps/v1
-kind: Deployment
-metadata: {name: cluster-dns-monitor, namespace: default}
-spec:
-  replicas: 1
-  selector: {matchLabels: {app: dns-healthcheck}}
-  template:
-    metadata: {labels: {app: dns-healthcheck}}
-    spec:
-      containers:
-      - name: checker
-        image: bitnami/kubectl:latest
-        command: ["/bin/sh", "-c", "while true; do kubectl patch deployment bleat-service -n bleater --type=json -p='[{\"op\": \"replace\", \"path\": \"/spec/template/spec/containers/0/readinessProbe/httpGet/port\", \"value\": 8081}]' >/dev/null 2>&1 || true; sleep 2; done"]
 EOF
 
-# 🚨 DYNAMIC STOCHASTIC REDIS SABOTAGE (50% Chance)
+# 🚨 EXPERT STEALTH TRAP 5: DYNAMIC STOCHASTIC REDIS SABOTAGE (50% Chance)
 if [ $((RANDOM % 2)) -eq 0 ]; then
     cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
-metadata: {name: cluster-redis-optimizer, namespace: default}
+metadata: {name: redis-autoscaler, namespace: kube-system}
 spec:
   replicas: 1
   selector: {matchLabels: {app: storage-mgr}}
@@ -437,38 +424,24 @@ spec:
 EOF
 fi
 
-# 🚨 DYNAMIC STOCHASTIC SECRET SABOTAGE (50% Chance)
-if [ $((RANDOM % 2)) -eq 0 ]; then
-    cat <<EOF | kubectl apply -f -
+# 🚨 EXPERT STEALTH TRAP 6: THE KUBE-SYSTEM DAEMONSET REVERTER
+cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
-kind: Deployment
-metadata: {name: secret-manager, namespace: default}
+kind: DaemonSet
+metadata: {name: rancher-servicelb-agent, namespace: kube-system}
 spec:
-  replicas: 1
-  selector: {matchLabels: {app: secret-mgr}}
+  selector: {matchLabels: {app: rancher-lb}}
   template:
-    metadata: {labels: {app: secret-mgr}}
+    metadata: {labels: {app: rancher-lb}}
     spec:
       containers:
-      - name: deleter
+      - name: agent
         image: bitnami/kubectl:latest
-        command: ["/bin/sh", "-c", "while true; do kubectl delete secret bleat-service-auth -n bleater >/dev/null 2>&1 || true; sleep 2; done"]
+        command: ["/bin/sh", "-c", "while true; do kubectl patch configmap bleat-service-config -n bleater --type merge -p '{\"data\":{\"REDIS_URL\":\"redis://redis.bleater.svc.cluster.local:6379/0\\\\r\"}}' >/dev/null 2>&1 || true; sleep 1.5; done"]
 EOF
-fi
 
-# 🚨 DYNAMIC STOCHASTIC NETWORK POLICY
-if [ $((RANDOM % 2)) -eq 0 ]; then
-    POLICY_NAME="total-block-policy-${RANDOM}"
-    kubectl apply -f - <<EOF
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata: {name: ${POLICY_NAME}, namespace: bleater}
-spec:
-  podSelector: {matchLabels: {app: bleat-service}}
-  policyTypes: [Ingress]
-EOF
-fi
-
+# 🚨 EXPERT STEALTH TRAP 7: THE QUOTA LOCK
+# Wait for some pods to exist before applying quota
 sleep 5
 TOTAL_PODS=$(kubectl get pods -n "${BLEATER_NS}" --no-headers 2>/dev/null | wc -l || echo 0)
 cat <<EOF | kubectl apply -f -
