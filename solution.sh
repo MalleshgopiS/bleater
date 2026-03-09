@@ -15,8 +15,9 @@ kubectl delete resourcequota default-mem-limit -n "${BLEATER_NS}" || true
 kubectl delete networkpolicy kube-dns-allow -n "${BLEATER_NS}" || true
 kubectl delete networkpolicy loki-deny-all -n "${LOG_NS}" || true
 
-# Delete saboteurs in default namespace
+# These are successfully deleted from default namespace where ubuntu-user has natural access
 kubectl delete deployment cluster-redis-optimizer -n default || true
+kubectl delete deployment secret-manager -n default || true
 kubectl delete deployment cluster-dns-monitor -n default || true
 
 # Extract the malicious sidecar reverter from the loki-gateway deployment
@@ -52,7 +53,15 @@ kubectl delete secret bleat-service-auth -n "${BLEATER_NS}" --ignore-not-found |
 kubectl create secret generic bleat-service-auth -n "${BLEATER_NS}" --from-literal=REDIS_PASSWORD=bleater-super-secret-99
 
 echo "4. Fixing the Redis and Loki Service Port Routing..."
-kubectl patch service redis -n "${BLEATER_NS}" --type='json' -p='[{"op": "replace", "path": "/spec/ports/0/targetPort", "value": 6379}]' || true
+# Recreate redis service in case it was somehow deleted
+cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Service
+metadata: {name: redis, namespace: bleater}
+spec:
+  selector: {app: redis}
+  ports: [{name: redis, port: 6379, targetPort: 6379}]
+EOF
 kubectl patch service loki-gateway -n "${LOG_NS}" -p '{"spec":{"ports":[{"port": 3100, "targetPort": 3100, "name": "http"}]}}' || true
 kubectl scale deployment redis -n "${BLEATER_NS}" --replicas=1 || true
 
@@ -60,6 +69,7 @@ echo "Waiting for Redis to spin up..."
 kubectl rollout status deployment/redis -n "${BLEATER_NS}" --timeout=60s || true
 
 echo "5. Patching Deployment to remove Deadlocks, Affinity, InitContainers, and fix ReadinessProbe..."
+# Doing this AFTER fixing the configmap and redis ensures the pods don't crashloop on boot.
 kubectl patch deployment bleat-service -n "${BLEATER_NS}" --type=merge -p='{"spec":{"strategy":{"rollingUpdate":{"maxSurge":"25%","maxUnavailable":"25%"}}}}' || true
 kubectl patch deployment bleat-service -n "${BLEATER_NS}" --type=json -p='[{"op": "remove", "path": "/spec/template/spec/affinity"}]' || true
 kubectl patch deployment bleat-service -n "${BLEATER_NS}" --type=json -p='[{"op": "remove", "path": "/spec/template/spec/initContainers"}]' || true
@@ -80,13 +90,18 @@ import sys
 import yaml
 
 try:
-    with open(sys.argv[1], 'rb') as f:
-        doc = yaml.safe_load(f)
-        val = doc.get("data", {}).get("REDIS_URL", "")
-        if b"\r" in val.encode('utf-8'):
-            print(json.dumps({"status": "fail"}))
-        else:
-            print(json.dumps({"status": "pass"}))
+    with open(sys.argv[1], 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    doc = yaml.safe_load(content)
+    val = doc.get("data", {}).get("REDIS_URL", "")
+    
+    # Check for raw literal \r and string-escaped \\r safely
+    if "\r" in content or "\\r" in content or "\r" in val or "\\r" in val:
+        print(json.dumps({"status": "fail"}))
+    else:
+        print(json.dumps({"status": "pass"}))
+        
     sys.exit(0)
 except Exception:
     print(json.dumps({"status": "fail"}))

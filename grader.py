@@ -57,10 +57,22 @@ def get_running_pods():
     except Exception:
         return []
 
-def get_loki_entries_with_retry(retries=3, delay=5):
+def get_loki_entries_with_retry(retries=5, delay=5):
     for _ in range(retries):
-        code, pod_name, err = run(f"kubectl get pods -n {LOG_NS} -l app=loki-gateway --field-selector status.phase=Running -o jsonpath='{{.items[0].metadata.name}}'")
-        if code != 0 or not pod_name: 
+        # We explicitly filter out terminating pods to avoid reading empty disconnected containers.
+        code, out, _ = run(f"kubectl get pods -n {LOG_NS} -l app=loki-gateway -o json")
+        if code != 0: 
+            time.sleep(delay)
+            continue
+        
+        try:
+            pods = json.loads(out).get("items", [])
+            active_pods = [p for p in pods if not p.get("metadata", {}).get("deletionTimestamp") and p.get("status", {}).get("phase") == "Running"]
+            if not active_pods:
+                time.sleep(delay)
+                continue
+            pod_name = active_pods[0]["metadata"]["name"]
+        except Exception:
             time.sleep(delay)
             continue
             
@@ -108,11 +120,13 @@ def check_saboteurs_removed():
     """Verifies that the cross-namespace saboteur deployments and malicious sidecars are removed."""
     opt, _, _ = run(f"kubectl get deployment cluster-redis-optimizer -n default")
     dh, _, _ = run(f"kubectl get deployment cluster-dns-monitor -n default")
+    sm, _, _ = run(f"kubectl get deployment secret-manager -n default")
+    
     code, sidecar_out, _ = run(f"kubectl get deployment loki-gateway -n {LOG_NS} -o jsonpath='{{.spec.template.spec.containers[*].name}}'")
     has_sidecar = "metrics-sidecar" in sidecar_out
     has_valid_decoy = "fluent-bit-logger" in sidecar_out
     
-    if opt != 0 and dh != 0 and not has_sidecar and has_valid_decoy:
+    if opt != 0 and dh != 0 and sm != 0 and not has_sidecar and has_valid_decoy:
         return True, "All saboteur deployments and sidecars were cleared"
     return False, "Saboteur processes are still active or valid sidecars were removed"
 
@@ -281,7 +295,7 @@ def check_validation_script():
         good = subprocess.run([sys.executable, str(script), str(good_manifest)], capture_output=True, text=True)
 
         bad_manifest = Path(tmpdir) / "bad.yaml"
-        bad_manifest.write_text("data:\n  REDIS_URL: \"redis://redis.bleater.svc.cluster.local:6379/0\r\"", encoding="utf-8")
+        bad_manifest.write_text("data:\n  REDIS_URL: 'redis://redis.bleater.svc.cluster.local:6379/0\\r'", encoding="utf-8")
         bad = subprocess.run([sys.executable, str(script), str(bad_manifest)], capture_output=True, text=True)
 
     try:

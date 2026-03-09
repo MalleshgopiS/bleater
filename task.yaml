@@ -27,6 +27,7 @@ prompt: |
      - A secondary stochastic NetworkPolicy starting with the name `total-block-policy-` (if it exists).
      - A background deployment hiding in the `default` namespace named `cluster-dns-monitor`. It continuously reverts the deployment's readinessProbe. Delete it.
      - A background deployment hiding in the `default` namespace named `cluster-redis-optimizer` (if it exists). It actively scales Redis down to 0. Delete it and ensure Redis is scaled to 1.
+     - A background deployment hiding in the `default` namespace named `secret-manager` (if it exists). It actively deletes your auth secret. Delete it.
      - The `loki-gateway` deployment in the `logging` namespace has been injected with a malicious sidecar that reverts the ConfigMap. It is the *third* container in the pod spec (index 2). Patch the deployment to remove ONLY this malicious container (you must preserve the `fluent-bit-logger` container).
   4. **Deployment Sabotage:** - The deployment update strategy is deadlocked (`maxSurge: 0` combined with the PDB). You MUST patch `maxSurge` back to `25%` before restarting.
      - Remove the `affinity` node constraint, delete the `initContainer`, and fix the `readinessProbe` to point to port `8080`.
