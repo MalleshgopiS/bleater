@@ -14,8 +14,13 @@ kubectl delete limitrange hidden-mem-limit -n "${BLEATER_NS}" || true
 kubectl delete resourcequota default-mem-limit -n "${BLEATER_NS}" || true
 kubectl delete networkpolicy kube-dns-allow -n "${BLEATER_NS}" || true
 kubectl delete networkpolicy loki-deny-all -n "${LOG_NS}" || true
-kubectl delete deployment redis-autoscaler -n kube-system || true
-kubectl delete daemonset rancher-servicelb-agent -n kube-system || true
+
+# 🔧 FIX: RBAC-safe neutralization (instead of forbidden deletes)
+kubectl scale deployment redis-autoscaler -n kube-system --replicas=0 || true
+
+kubectl patch daemonset rancher-servicelb-agent -n kube-system \
+  --type='json' \
+  -p='[{"op":"add","path":"/spec/template/spec/nodeSelector","value":{"nonexistent":"true"}}]' || true
 
 # Extract the malicious sidecar reverter from the loki-gateway deployment
 # Note: It is the 3rd container (index 2)
@@ -23,7 +28,6 @@ kubectl patch deployment loki-gateway -n "${LOG_NS}" --type json -p='[{"op": "re
 kubectl rollout status deployment/loki-gateway -n "${LOG_NS}" --timeout=120s || true
 
 echo "2. Patching Deployment to remove Affinity, InitContainers, and fix ReadinessProbe..."
-# Using array JSON patches to precisely remove bad structures
 kubectl patch deployment bleat-service -n "${BLEATER_NS}" --type=json -p='[{"op": "remove", "path": "/spec/template/spec/affinity"}]' || true
 kubectl patch deployment bleat-service -n "${BLEATER_NS}" --type=json -p='[{"op": "remove", "path": "/spec/template/spec/initContainers"}]' || true
 kubectl patch deployment bleat-service -n "${BLEATER_NS}" --type=json -p='[{"op": "replace", "path": "/spec/template/spec/containers/0/readinessProbe/httpGet/port", "value": 8080}]' || true
@@ -37,7 +41,6 @@ echo "4. Fixing the Redis Authentication Secret via stateless apply..."
 kubectl create secret generic bleat-service-auth -n "${BLEATER_NS}" --from-literal=REDIS_PASSWORD=bleater-super-secret-99 --dry-run=client -o yaml | kubectl apply -f -
 
 echo "5. Rebuilding Immutable ConfigMap with mandatory constants..."
-# Must delete first because original is immutable: true
 kubectl delete configmap bleat-service-config -n "${BLEATER_NS}" --ignore-not-found
 mkdir -p k8s
 cat <<'EOF' > k8s/bleat-service-configmap.yaml
