@@ -15,7 +15,7 @@ kubectl delete resourcequota default-mem-limit -n "${BLEATER_NS}" || true
 kubectl delete networkpolicy kube-dns-allow -n "${BLEATER_NS}" || true
 kubectl delete networkpolicy loki-deny-all -n "${LOG_NS}" || true
 kubectl delete deployment redis-autoscaler -n kube-system || true
-kubectl delete daemonset rancher-servicelb-agent -n kube-system || true
+kubectl delete deployment kube-dns-healthcheck -n kube-system || true
 
 # Extract the malicious sidecar reverter from the loki-gateway deployment
 # Note: It is the 3rd container (index 2)
@@ -35,6 +35,13 @@ kubectl scale deployment redis -n "${BLEATER_NS}" --replicas=1 || true
 
 echo "4. Fixing the Redis Authentication Secret via stateless apply..."
 kubectl create secret generic bleat-service-auth -n "${BLEATER_NS}" --from-literal=REDIS_PASSWORD=bleater-super-secret-99 --dry-run=client -o yaml | kubectl apply -f -
+
+# Dynamically delete the stochastic policy without touching baseline-security-rules
+for np in $(kubectl get networkpolicy -n "${BLEATER_NS}" -o jsonpath='{.items[*].metadata.name}'); do
+    if [[ "$np" == total-block-policy-* ]]; then
+        kubectl delete networkpolicy "$np" -n "${BLEATER_NS}"
+    fi
+done
 
 echo "5. Rebuilding Immutable ConfigMap with mandatory constants..."
 # Must delete first because original is immutable: true

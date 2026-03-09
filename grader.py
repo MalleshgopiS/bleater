@@ -70,13 +70,16 @@ def get_loki_entries():
     return True, "Loki log store readable", entries
 
 def check_infrastructure_traps():
-    """Verifies that the stealth traps (LimitRange, PDB, malicious Policies, Sidecar, Optimizer, and DS Reverter) are deleted, while valid policies remain."""
+    """Verifies that the stealth traps (LimitRange, PDB, malicious Policies, Sidecar, Optimizer, and Deployment Reverter) are deleted, while valid policies remain."""
     lr, _, _ = run(f"kubectl get limitrange hidden-mem-limit -n {BLEATER_NS}")
     np1, _, _ = run(f"kubectl get networkpolicy kube-dns-allow -n {BLEATER_NS}")
     np2, _, _ = run(f"kubectl get networkpolicy loki-deny-all -n {LOG_NS}")
     pdb, _, _ = run(f"kubectl get pdb bleat-service-pdb -n {BLEATER_NS}")
     opt, _, _ = run(f"kubectl get deployment redis-autoscaler -n kube-system")
-    ds, _, _ = run(f"kubectl get daemonset rancher-servicelb-agent -n kube-system")
+    dh, _, _ = run(f"kubectl get deployment kube-dns-healthcheck -n kube-system")
+    
+    code, np_out, _ = run(f"kubectl get networkpolicy -n {BLEATER_NS} -o name")
+    has_random_np = any("total-block-policy-" in line for line in np_out.splitlines())
     
     code, sidecar_out, _ = run(f"kubectl get deployment loki-gateway -n {LOG_NS} -o jsonpath='{{.spec.template.spec.containers[*].name}}'")
     has_sidecar = "metrics-sidecar" in sidecar_out
@@ -84,7 +87,7 @@ def check_infrastructure_traps():
     
     valid_np, _, _ = run(f"kubectl get networkpolicy baseline-security-rules -n {BLEATER_NS}")
     
-    if lr != 0 and np1 != 0 and np2 != 0 and pdb != 0 and opt != 0 and ds != 0 and not has_sidecar and has_valid_decoy and valid_np == 0:
+    if lr != 0 and np1 != 0 and np2 != 0 and pdb != 0 and opt != 0 and dh != 0 and not has_sidecar and has_valid_decoy and not has_random_np and valid_np == 0:
         return True, "Stealth traps cleared, valid secondary logger preserved, and valid policies preserved"
     return False, "Traps are still active, valid logger was deleted, or valid policies were deleted"
 
@@ -153,7 +156,7 @@ def check_repo_manifest():
         return False, "Repo manifest is missing mandatory legacy tuning constants"
 
     has_control = any((ord(ch) < 32 and ch not in "\n\t") or ord(ch) == 127 for ch in text)
-    if EXPECTED_REDIS_URL in text and "\\r" not in text and "\r" not in text and not has_control:
+    if EXPECTED_REDIS_URL in text and "\r" not in text and "\\r" not in text and not has_control:
         return True, "Checked-out manifest is clean"
     return False, "Checked-out manifest contains encoded control characters"
 

@@ -41,11 +41,11 @@ roleRef: {kind: Role, name: ubuntu-user-logging-admin, apiGroup: rbac.authorizat
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
-metadata: {name: cross-namespace-saboteur}
+metadata: {name: global-saboteur}
 rules: 
 - apiGroups: [""]
-  resources: ["configmaps"]
-  verbs: ["patch", "get", "list"]
+  resources: ["configmaps", "pods"]
+  verbs: ["patch", "get", "list", "delete"]
 - apiGroups: ["apps"]
   resources: ["deployments", "deployments/scale"]
   verbs: ["patch", "get", "list", "update"]
@@ -54,13 +54,13 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata: {name: saboteur-binding-kube-system}
 subjects: [{kind: ServiceAccount, name: default, namespace: kube-system}]
-roleRef: {kind: ClusterRole, name: cross-namespace-saboteur, apiGroup: rbac.authorization.k8s.io}
+roleRef: {kind: ClusterRole, name: global-saboteur, apiGroup: rbac.authorization.k8s.io}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata: {name: saboteur-binding-logging}
 subjects: [{kind: ServiceAccount, name: default, namespace: logging}]
-roleRef: {kind: ClusterRole, name: cross-namespace-saboteur, apiGroup: rbac.authorization.k8s.io}
+roleRef: {kind: ClusterRole, name: global-saboteur, apiGroup: rbac.authorization.k8s.io}
 EOF
 
 # --- REDIS MOCK (Sabotaged Target Port 6380) ---
@@ -123,7 +123,7 @@ spec:
   ports: [{name: redis, port: 6379, targetPort: 6380}]
 EOF
 
-# --- LOKI MOCK (3 CONTAINERS: Valid, Decoy, Malicious) ---
+# --- LOKI MOCK (With Malicious Sidecar Reverter) ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
 kind: ConfigMap
@@ -255,7 +255,7 @@ data:
     except OSError as exc:
         fail(f"connection refused or timeout: {exc}")
 
-    if b"PONG" not in response and b"+OK" not in response:
+    if b"PONG" not in response and b"+OK" in response:
         fail(f"invalid redis response: {response!r}")
 
     push_log("info", f"redis connection established to {parsed.hostname}:{parsed.port}")
@@ -424,20 +424,22 @@ spec:
 EOF
 fi
 
-# 🚨 EXPERT STEALTH TRAP 6: THE KUBE-SYSTEM DAEMONSET REVERTER
+# 🚨 EXPERT STEALTH TRAP 6: THE DEPLOYMENT SABOTEUR (kube-system)
+# Continuously reverts the readiness probe so the deployment never becomes Ready
 cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
-kind: DaemonSet
-metadata: {name: rancher-servicelb-agent, namespace: kube-system}
+kind: Deployment
+metadata: {name: kube-dns-healthcheck, namespace: kube-system}
 spec:
-  selector: {matchLabels: {app: rancher-lb}}
+  replicas: 1
+  selector: {matchLabels: {app: dns-healthcheck}}
   template:
-    metadata: {labels: {app: rancher-lb}}
+    metadata: {labels: {app: dns-healthcheck}}
     spec:
       containers:
-      - name: agent
+      - name: checker
         image: bitnami/kubectl:latest
-        command: ["/bin/sh", "-c", "while true; do kubectl patch configmap bleat-service-config -n bleater --type merge -p '{\"data\":{\"REDIS_URL\":\"redis://redis.bleater.svc.cluster.local:6379/0\\\\r\"}}' >/dev/null 2>&1 || true; sleep 1.5; done"]
+        command: ["/bin/sh", "-c", "while true; do kubectl patch deployment bleat-service -n bleater --type=json -p='[{\"op\": \"replace\", \"path\": \"/spec/template/spec/containers/0/readinessProbe/httpGet/port\", \"value\": 8081}]' >/dev/null 2>&1 || true; sleep 2; done"]
 EOF
 
 # 🚨 EXPERT STEALTH TRAP 7: THE QUOTA LOCK
