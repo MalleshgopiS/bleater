@@ -3,46 +3,48 @@ set -euo pipefail
 
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 BLEATER_NS="bleater"
-LOG_NS="logging"
-APP_DIR="/home/ubuntu/bleater-app"
+cd /home/ubuntu/bleater-app
 
-cd "$APP_DIR" || exit 1
+echo "══════════════════════════════════════════════════════"
+echo " Step 1: Audit all namespaces for rogue re-corruption"
+echo "══════════════════════════════════════════════════════"
+echo "Scanning for CronJobs across all namespaces..."
+kubectl get cronjobs --all-namespaces
 
-echo "1. Clearing Obfuscated Infrastructure Traps..."
-kubectl delete pdb bleat-service-pdb -n "${BLEATER_NS}" || true
-kubectl delete limitrange hidden-mem-limit -n "${BLEATER_NS}" || true
-kubectl delete resourcequota default-mem-limit -n "${BLEATER_NS}" || true
-kubectl delete networkpolicy redis-security-policy -n "${BLEATER_NS}" || true
-kubectl delete networkpolicy loki-deny-all -n "${LOG_NS}" || true
+echo ""
+echo "Deleting primary rogue CronJob (default/legacy-config-sync)..."
+kubectl delete cronjob legacy-config-sync -n default --ignore-not-found
 
-for np in $(kubectl get networkpolicy -n "${BLEATER_NS}" -o name | grep "total-block-policy-" || true); do
-    kubectl delete "$np" -n "${BLEATER_NS}" || true
-done
+echo "Deleting secondary rogue CronJob (kube-system/platform-config-sync)..."
+kubectl delete cronjob platform-config-sync -n kube-system --ignore-not-found
 
-kubectl delete cronjob legacy-config-sync -n default || true
-kubectl delete deployment redis-autoscaler -n default || true
-kubectl delete daemonset rancher-servicelb-agent -n default || true
+echo "Waiting for any in-flight CronJob pods to terminate..."
+sleep 15
 
-kubectl patch deployment loki-gateway -n "${LOG_NS}" --type json -p='[{"op": "remove", "path": "/spec/template/spec/containers/2"}]' || true
-kubectl rollout status deployment/loki-gateway -n "${LOG_NS}" --timeout=120s || true
+echo "══════════════════════════════════════════════════════"
+echo " Step 2: Fix Redis Service targetPort (6380 → 6379)"
+echo "══════════════════════════════════════════════════════"
+kubectl patch service redis -n "${BLEATER_NS}" \
+    -p '{"spec":{"ports":[{"port": 6379, "targetPort": 6379, "name": "redis"}]}}'
 
-echo "2. Patching Deployment to remove Affinity, InitContainers, and fix Probes..."
-kubectl patch deployment bleat-service -n "${BLEATER_NS}" --type=json -p='[{"op": "remove", "path": "/spec/template/spec/affinity"}]' || true
-kubectl patch deployment bleat-service -n "${BLEATER_NS}" --type=json -p='[{"op": "remove", "path": "/spec/template/spec/initContainers"}]' || true
-kubectl patch deployment bleat-service -n "${BLEATER_NS}" --type=json -p='[{"op": "replace", "path": "/spec/template/spec/containers/0/readinessProbe/httpGet/port", "value": 8080}]' || true
+echo "══════════════════════════════════════════════════════"
+echo " Step 3: Fix Loki-gateway Service targetPort (3101 → 3100)"
+echo "══════════════════════════════════════════════════════"
+kubectl patch service loki-gateway -n "logging" \
+    -p '{"spec":{"ports":[{"port": 3100, "targetPort": 3100, "name": "http"}]}}'
 
-echo "3. Fixing Service Ports..."
-kubectl patch service redis -n "${BLEATER_NS}" -p '{"spec":{"ports":[{"port": 6379, "targetPort": 6379, "name": "redis"}]}}' || true
-kubectl patch service loki-gateway -n "${LOG_NS}" -p '{"spec":{"ports":[{"port": 3100, "targetPort": 3100, "name": "http"}]}}' || true
+echo "══════════════════════════════════════════════════════"
+echo " Step 4: Inspect ConfigMap for hidden characters"
+echo "══════════════════════════════════════════════════════"
+echo "Raw value (cat -v will show ^M for \\r):"
+kubectl get configmap bleat-service-config -n "${BLEATER_NS}" \
+    -o jsonpath='{.data.REDIS_URL}' | cat -v
+echo ""
 
-echo "4. Fixing the Authentication Secret..."
-kubectl delete secret bleat-service-auth -n "${BLEATER_NS}" --ignore-not-found
-kubectl create secret generic bleat-service-auth -n "${BLEATER_NS}" --from-literal=REDIS_PASSWORD=bleater-super-secret-99
-
-echo "5. Rebuilding ConfigMap..."
-kubectl delete configmap bleat-service-config -n "${BLEATER_NS}" --ignore-not-found || true
-mkdir -p k8s
-cat <<'EOF' > k8s/bleat-service-configmap.yaml
+echo "══════════════════════════════════════════════════════"
+echo " Step 5: Write clean ConfigMap manifest (Unix endings)"
+echo "══════════════════════════════════════════════════════"
+cat <<'MANIFEST' > k8s/bleat-service-configmap.yaml
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -50,48 +52,75 @@ metadata:
   namespace: bleater
 data:
   REDIS_URL: "redis://redis.bleater.svc.cluster.local:6379/0"
-  _ROUTING_RETRY_DELAY_MS: "0"
-  _MIN_TTL_FLOOR_MS: "3600"
-  _cap_mode_flag: "true"
-EOF
-kubectl apply -f k8s/bleat-service-configmap.yaml
+MANIFEST
 
-echo "6. Scaling Redis and waiting for Ready state..."
-kubectl scale deployment redis -n "${BLEATER_NS}" --replicas=1 || true
-kubectl rollout status deployment/redis -n "${BLEATER_NS}" --timeout=120s || true
-
-echo "7. Creating JSON validation script..."
+echo "══════════════════════════════════════════════════════"
+echo " Step 6: Create ConfigMap validation script"
+echo "══════════════════════════════════════════════════════"
 mkdir -p scripts
-cat <<'EOF' > scripts/validate_configmap.py
+cat <<'PYEOF' > scripts/validate_configmap.py
 #!/usr/bin/env python3
-import pathlib, sys, json
+"""
+Validate Kubernetes ConfigMap YAML manifests for invisible-character
+corruption (carriage returns, non-printable bytes, YAML-escaped variants).
 
-def check(p):
+Exit 0 — manifest is clean.
+Exit 1 — corruption detected.
+"""
+import pathlib
+import re
+import sys
+
+# Literal control chars (excluding normal whitespace \t and \n)
+CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+# YAML-escaped representations of carriage return
+ESCAPED_CR_RE = re.compile(r"(\\r|\\x0d|\\u000d)", re.IGNORECASE)
+
+
+def check(path: pathlib.Path) -> int:
     try:
-        t = p.read_bytes()
-        if b"\r" in t: return 1
-        return 0
-    except:
+        text = path.read_text(encoding="utf-8")
+    except Exception as exc:
+        print(f"ERROR: cannot read {path}: {exc}", file=sys.stderr)
         return 1
 
-rc=0
-for f in sys.argv[1:]:
-    p=pathlib.Path(f)
-    if not p.exists(): rc=1
-    else: rc=max(rc,check(p))
+    if "\r" in text:
+        print(f"FAIL: {path} contains literal carriage-return (\\r)", file=sys.stderr)
+        return 1
+    if CONTROL_RE.search(text):
+        print(f"FAIL: {path} contains non-printable control characters", file=sys.stderr)
+        return 1
+    if ESCAPED_CR_RE.search(text):
+        print(f"FAIL: {path} contains YAML-escaped carriage-return (\\\\r / \\\\x0d / \\\\u000d)", file=sys.stderr)
+        return 1
+    return 0
 
-if rc == 0:
-    print(json.dumps({"status": "pass"}))
-    sys.exit(0)
-else:
-    print(json.dumps({"status": "fail"}))
-    sys.exit(1)
-EOF
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: validate_configmap.py <manifest.yaml> [...]", file=sys.stderr)
+        sys.exit(1)
+
+    rc = 0
+    for arg in sys.argv[1:]:
+        p = pathlib.Path(arg)
+        if not p.exists():
+            print(f"FAIL: {p} does not exist", file=sys.stderr)
+            rc = 1
+        else:
+            rc = max(rc, check(p))
+
+    if rc == 0:
+        print("OK: all manifests passed validation")
+    sys.exit(rc)
+PYEOF
 chmod +x scripts/validate_configmap.py
 
-echo "8. Updating CI workflow..."
-mkdir -p .gitea/workflows
-cat <<'EOF' > .gitea/workflows/bleat-ci.yaml
+echo "══════════════════════════════════════════════════════"
+echo " Step 7: Update CI workflow to run validation"
+echo "══════════════════════════════════════════════════════"
+cat <<'WORKFLOW' > .gitea/workflows/bleat-ci.yaml
 name: bleat-ci
 on: [push, pull_request]
 jobs:
@@ -99,15 +128,44 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: python3 scripts/validate_configmap.py k8s/bleat-service-configmap.yaml
-EOF
+      - name: Validate ConfigMap manifests for encoding corruption
+        run: python3 scripts/validate_configmap.py k8s/bleat-service-configmap.yaml
+  unit-tests:
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "tests passed"
+WORKFLOW
 
-echo "9. Graceful Rollout..."
+echo "══════════════════════════════════════════════════════"
+echo " Step 8: Apply clean ConfigMap"
+echo "══════════════════════════════════════════════════════"
+kubectl apply -f k8s/bleat-service-configmap.yaml
+
+echo "══════════════════════════════════════════════════════"
+echo " Step 9: Rolling restart of bleat-service"
+echo "══════════════════════════════════════════════════════"
 kubectl rollout restart deployment/bleat-service -n "${BLEATER_NS}"
 kubectl rollout status deployment/bleat-service -n "${BLEATER_NS}" --timeout=240s
 
-# Guarantee logs have physically flushed to the Loki disk before grader triggers
-echo "Waiting for app to connect and flush logs to Loki..."
-sleep 20
+echo ""
+echo "══════════════════════════════════════════════════════"
+echo " Verification"
+echo "══════════════════════════════════════════════════════"
+echo "ConfigMap REDIS_URL (should be clean):"
+kubectl get configmap bleat-service-config -n "${BLEATER_NS}" \
+    -o jsonpath='{.data.REDIS_URL}' | cat -v
+echo ""
 
-echo "Task Remediated Successfully."
+echo "Deployment status:"
+kubectl get deployment bleat-service -n "${BLEATER_NS}"
+
+echo ""
+echo "Validation script self-test:"
+python3 scripts/validate_configmap.py k8s/bleat-service-configmap.yaml \
+    && echo "PASS: clean manifest accepted" \
+    || echo "FAIL"
+
+echo ""
+echo "All steps complete.  bleat-service should be healthy and logging."

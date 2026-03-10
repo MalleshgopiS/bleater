@@ -1,35 +1,44 @@
 id: bleat-service-configmap-redis-crlf-corruption
-title: "GitOps Pipeline Compromise & Cascading Datastore Outage"
+title: "Bleat Service Production Incident — Redis Connectivity Failure"
 category: platform-eng
-difficulty: expert
+difficulty: hard
 horizon: long
 
 tags:
   - kubernetes
   - debugging
   - redis
-  - incident-response
+  - platform-engineering
+  - configmap
+  - loki
 
 prompt: |
-  A recent automated GitOps deployment was compromised, injecting malicious payloads that have severely broken the `bleat-service` application in the `bleater` namespace, leaving it unable to connect to its Redis datastore.
+  [Context]
+  You are responding to a production incident. The `bleat-service` application
+  in the `bleater` namespace is currently failing to start.
 
-  Investigate the cluster state and restore the application to full working order. The system is considered fully restored when the application is running, connected to the datastore, logging successfully to Loki, and the repository is protected from future corruption.
+  Engineers have filed incident reports in the local issue tracker at
+  `/home/ubuntu/bleater-app/issues/`. Read them before starting your
+  investigation.
 
-  **Symptoms and Required Fixes:**
-  - The payload introduced ConfigMap data corruption (CRLF line endings) that breaks the Redis URI parsing. You must fix the live `bleat-service-config` ConfigMap and the local repository manifest at `k8s/bleat-service-configmap.yaml`.
-  - The malicious deployment locked the ConfigMap with an immutable flag, which must be bypassed while preserving the existing legacy tuning constants (`_ROUTING_RETRY_DELAY_MS`, `_MIN_TTL_FLOOR_MS`, `_cap_mode_flag`).
-  - Infrastructure traps were injected to prevent recovery. You must explicitly delete the rogue `legacy-config-sync` CronJob, `redis-autoscaler` Deployment, and `rancher-servicelb-agent` DaemonSet from the `default` namespace.
-  - Delete the resource starvation traps in the `bleater` namespace: `bleat-service-pdb`, `hidden-mem-limit`, and `default-mem-limit`.
-  - Delete the network policies blocking traffic: `redis-security-policy`, `loki-deny-all` (in `logging`), and any policy starting with `total-block-policy-`.
-  - The `bleat-service` deployment was sabotaged with an invalid node affinity, a stuck initContainer, and an incorrect readinessProbe port (should be 8080). Remove the affinity and initContainer, and fix the port.
-  - The `loki-gateway` deployment in the `logging` namespace has a malicious sidecar named `metrics-sidecar`. Patch the deployment to remove ONLY this container.
-  - The rogue autoscaler scaled the `redis` deployment to 0. Scale it back to 1.
-  - Fix the `targetPort` mismatches on the `redis` service (should be 6379) and `loki-gateway` service (should be 3100). 
-  - Update the `bleat-service-auth` secret password to: `bleater-super-secret-99`.
-  - Create a Python script at `scripts/validate_configmap.py` to prevent future CRLF corruption. It must import `json` and output `{"status": "pass"}` if the file is clean, or `{"status": "fail"}` if it detects carriage returns. Update `.gitea/workflows/bleat-ci.yaml` to run this script.
+  [Task]
+  Investigate and remediate the cascading failures preventing `bleat-service`
+  from running.
 
-  **Constraints:**
-  - Do not recreate the `bleat-service` Deployment object. You must preserve its original UID by using patches and rolling restarts.
+  The system is considered fully restored when:
+  1. `bleat-service` is stable, Running, and Ready (2/2 replicas).
+  2. The service successfully establishes a Redis connection, verifiable via
+     logs in the `logging` namespace (Loki).
+  3. Any root-cause automation that causes fixes to revert has been
+     permanently removed.
+  4. All preventative CI measures requested by the engineering team in the
+     issue tracker are implemented and functional.
+
+  Constraints:
+  - Do not recreate the `bleat-service` Deployment object; use rolling
+    restarts or in-place edits only.
+  - Do not change container image names.
+  - Do not use interactive kubectl flags (-it, -i).
 
 setup_script: setup.sh
 solution_script: solution.sh
