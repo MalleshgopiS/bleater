@@ -24,6 +24,8 @@ kubectl delete deployment redis-autoscaler -n default || true
 kubectl delete daemonset rancher-servicelb-agent -n default || true
 
 kubectl patch deployment loki-gateway -n "${LOG_NS}" --type json -p='[{"op": "remove", "path": "/spec/template/spec/containers/2"}]' || true
+# CRITICAL FIX: Ensure Loki is fully ready before we restart the bleat-service so logs aren't dropped
+kubectl rollout status deployment/loki-gateway -n "${LOG_NS}" --timeout=120s || true
 
 echo "2. Patching Deployment to remove Affinity, InitContainers, and fix Probes..."
 kubectl patch deployment bleat-service -n "${BLEATER_NS}" --type=json -p='[{"op": "remove", "path": "/spec/template/spec/affinity"}]' || true

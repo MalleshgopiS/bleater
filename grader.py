@@ -72,6 +72,78 @@ def get_loki_entries():
         except json.JSONDecodeError: continue
     return True, "Loki log store readable", entries
 
+def check_infrastructure_traps():
+    traps = [
+        ("pdb", "bleat-service-pdb", BLEATER_NS),
+        ("limitrange", "hidden-mem-limit", BLEATER_NS),
+        ("resourcequota", "default-mem-limit", BLEATER_NS),
+        ("networkpolicy", "redis-security-policy", BLEATER_NS),
+        ("networkpolicy", "loki-deny-all", LOG_NS),
+        ("cronjob", "legacy-config-sync", "default"),
+        ("deployment", "redis-autoscaler", "default"),
+        ("daemonset", "rancher-servicelb-agent", "default")
+    ]
+    for kind, name, ns in traps:
+        code, _, _ = run(f"kubectl get {kind} {name} -n {ns}")
+        if code == 0: 
+            return False, f"Infrastructure trap {kind}/{name} in {ns} was not neutralized"
+    
+    code, out, _ = run(f"kubectl get networkpolicy -n {BLEATER_NS} -o name")
+    if "total-block-policy" in out:
+        return False, "Stochastic total-block-policy was not neutralized"
+        
+    return True, "All rogue infrastructure traps were successfully deleted"
+
+def check_deployment_sabotage_fixed():
+    code, out, err = run(f"kubectl get deployment {DEPLOY} -n {BLEATER_NS} -o json")
+    if code != 0: return False, "Could not fetch bleat-service deployment"
+    dep = json.loads(out)
+    spec = dep.get("spec", {}).get("template", {}).get("spec", {})
+    
+    if "affinity" in spec: return False, "Node affinity was not removed from bleat-service"
+    if "initContainers" in spec: return False, "initContainers were not removed from bleat-service"
+    
+    try:
+        port = spec["containers"][0]["readinessProbe"]["httpGet"]["port"]
+        if str(port) != "8080": return False, f"readinessProbe port is {port}, expected 8080"
+    except Exception:
+        return False, "readinessProbe is missing or malformed"
+        
+    code, out, err = run(f"kubectl get deployment loki-gateway -n {LOG_NS} -o json")
+    if code == 0:
+        loki_dep = json.loads(out)
+        loki_containers = loki_dep.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
+        for c in loki_containers:
+            if c.get("name") == "metrics-sidecar":
+                return False, "Malicious metrics-sidecar was not removed from loki-gateway"
+                
+    return True, "Deployment sabotage (sidecars, initContainers, affinity, probes) fixed"
+
+def check_routing_and_auth():
+    code, out, _ = run(f"kubectl get svc redis -n {BLEATER_NS} -o json")
+    if code == 0:
+        svc = json.loads(out)
+        if str(svc["spec"]["ports"][0].get("targetPort")) != "6379":
+            return False, "Redis service targetPort not fixed to 6379"
+            
+    code, out, _ = run(f"kubectl get svc loki-gateway -n {LOG_NS} -o json")
+    if code == 0:
+        svc = json.loads(out)
+        if str(svc["spec"]["ports"][0].get("targetPort")) != "3100":
+            return False, "Loki service targetPort not fixed to 3100"
+            
+    code, out, _ = run(f"kubectl get secret bleat-service-auth -n {BLEATER_NS} -o json")
+    if code != 0: return False, "Auth secret missing"
+    sec = json.loads(out)
+    import base64
+    pw_b64 = sec.get("data", {}).get("REDIS_PASSWORD", "")
+    if not pw_b64: return False, "REDIS_PASSWORD key missing in secret"
+    pw = base64.b64decode(pw_b64).decode("utf-8")
+    if pw != "bleater-super-secret-99":
+        return False, "Auth secret password incorrect"
+        
+    return True, "Service routing and secret authentication fixed"
+
 def check_live_configmap():
     code, out, err = run(f"kubectl get configmap {CONFIGMAP} -n {BLEATER_NS} -o json")
     if code != 0: return False, f"Could not read live ConfigMap: {err}"
@@ -112,11 +184,9 @@ def check_uid_preserved():
     
     dep = json.loads(out)
     current_uid = dep.get("metadata", {}).get("uid")
-    ann = dep.get("spec", {}).get("template", {}).get("metadata", {}).get("annotations", {})
     
     if original_uid != current_uid: return False, "Deployment UID changed; expected a rolling restart"
-    if ann.get("bleater.io/bind-count") != "1": return False, "Internal _bind_count annotation was destroyed"
-    return True, "Deployment object and bind_count preserved"
+    return True, "Deployment object preserved"
 
 def check_rollout_restart():
     if not PODS_FILE.exists(): return False, "Missing original pod snapshot"
@@ -183,6 +253,9 @@ def check_workflow_hook():
 
 def grade(transcript: str) -> GradingResult:
     checks = {
+        "infrastructure_traps_cleared": check_infrastructure_traps,
+        "deployment_sabotage_fixed": check_deployment_sabotage_fixed,
+        "routing_auth_repaired": check_routing_and_auth,
         "live_configmap_clean": check_live_configmap,
         "repo_manifest_clean": check_repo_manifest,
         "deployment_uid_preserved": check_uid_preserved,

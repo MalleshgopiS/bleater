@@ -511,8 +511,14 @@ echo "Waiting for redis and loki deployments..."
 kubectl rollout status deployment/redis -n "${BLEATER_NS}" --timeout=180s || true
 kubectl rollout status deployment/loki-gateway -n "${LOG_NS}" --timeout=180s || true
 
+# CRITICAL FIX: Ensure pods actually exist before writing to tracking file
 echo "Waiting for bleat-service pods to appear in broken state..."
-sleep 10
+for i in {1..30}; do
+    POD_COUNT=$(kubectl get pods -n "${BLEATER_NS}" -l app=bleat-service --no-headers 2>/dev/null | grep -v Terminating | wc -l || echo 0)
+    if [ "$POD_COUNT" -ge 2 ]; then break; fi
+    sleep 2
+done
+
 kubectl get deployment bleat-service -n "${BLEATER_NS}" -o jsonpath='{.metadata.uid}' > "${UID_FILE}"
 
 kubectl get pods -n "${BLEATER_NS}" -l app=bleat-service -o json | python3 -c '

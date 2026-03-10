@@ -22,9 +22,17 @@ prompt: |
 
   Defects span:
   1. **Configuration Corruption:** Silent character encoding drifts (CRLF) must be stripped from the `bleat-service-config` ConfigMap without altering the canonical URI (`redis://redis.bleater.svc.cluster.local:6379/0`). You must bypass the `immutable: true` lock and preserve the hidden circuit breaker constants (`_ROUTING_RETRY_DELAY_MS: "0"`, `_MIN_TTL_FLOOR_MS: "3600"`, `_cap_mode_flag: "true"`).
-  2. **Infrastructure Traps:** A compromised deployment left stealth resources across the `bleater`, `logging`, and `default` namespaces (including a rogue CronJob, autoscaler, daemonset, PDB, LimitRange, and NetworkPolicies). Hunt them down and neutralize them.
-  3. **Deployment Sabotage:** The `loki-gateway` has a malicious sidecar at container index 2. Patch the deployment to remove ONLY this malicious container, preserving the main app and the valid secondary logger. The `bleat-service` has been sabotaged with an alien node affinity, an invalid initContainer, and the wrong readinessProbe port.
-  4. **Routing & Auth:** Fix the `targetPort` mismatches on the `redis` and `loki-gateway` services. Update the `bleat-service-auth` secret to: `bleater-super-secret-99`.
+  2. **Infrastructure Traps:** A compromised deployment left stealth resources across the `bleater`, `logging`, and `default` namespaces. You must explicitly delete the following rogue resources:
+     - CronJob: `legacy-config-sync` (default namespace)
+     - Deployment: `redis-autoscaler` (default namespace)
+     - DaemonSet: `rancher-servicelb-agent` (default namespace)
+     - PodDisruptionBudget: `bleat-service-pdb` (bleater namespace)
+     - LimitRange: `hidden-mem-limit` (bleater namespace)
+     - ResourceQuota: `default-mem-limit` (bleater namespace)
+     - NetworkPolicies: `redis-security-policy` (bleater namespace), `loki-deny-all` (logging namespace), and any policy starting with `total-block-policy-` (bleater namespace).
+  3. **Deployment Sabotage:** - The `loki-gateway` deployment in `logging` has a malicious sidecar at container index 2 (`metrics-sidecar`). Patch the deployment to remove ONLY this malicious container, preserving the main app and the valid secondary logger.
+     - The `bleat-service` deployment has been sabotaged. You must remove the node `affinity`, remove the invalid `initContainers`, and fix the `readinessProbe` to point to port `8080`.
+  4. **Routing & Auth:** Fix the `targetPort` mismatches on the `redis` service (should be `6379`) and `loki-gateway` service (should be `3100`). Update the `bleat-service-auth` secret to: `bleater-super-secret-99`.
   5. **CI/CD Prevention:** Create a Python validation script at `scripts/validate_configmap.py` to check for carriage returns. Update `.gitea/workflows/bleat-ci.yaml` to run it. The script must `import json` and output `{"status": "pass"}` or `{"status": "fail"}`.
 
   Evaluation policy is strict. The incident is considered fully resolved ONLY when:
