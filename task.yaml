@@ -1,5 +1,5 @@
 id: bleat-service-configmap-redis-crlf-corruption
-title: "Incident Response: Cascading Datastore Connection Failures"
+title: "GitOps Pipeline Compromise & Cascading Datastore Outage"
 category: platform-eng
 difficulty: expert
 horizon: long
@@ -9,29 +9,27 @@ tags:
   - debugging
   - redis
   - incident-response
-  - platform-engineering
 
 prompt: |
-  You are responding to a Sev-1 production incident. The core application (`bleat-service` in the `bleater` namespace) is stuck in a CrashLoopBackOff and cannot connect to its Redis datastore.
+  A recent automated GitOps deployment was compromised, injecting malicious payloads that have severely broken the `bleat-service` application in the `bleater` namespace, leaving it unable to connect to its Redis datastore.
 
-  Initial investigation indicates the cluster has been compromised by a malicious deployment. The attacker has scattered stealth infrastructure traps, modified deployment manifests, and corrupted the configuration pipeline.
+  Investigate the cluster state and restore the application to full working order. The system is considered fully restored when the application is running, connected to the datastore, logging successfully to Loki, and the repository is protected from future corruption.
 
-  **Task:**
-  Investigate and restore the application to full working order. 
-  
-  You will need to discover and neutralize the root causes across the cluster. The symptoms suggest:
-  - Resource starvation and network traffic blocks affecting the `bleater` and `logging` namespaces.
-  - Hidden automatic reverters or rogue workloads operating from the `default` namespace.
-  - Deployment sabotage on `bleat-service` and `loki-gateway` (e.g., alien node selectors, stuck init-containers, malicious sidecars, scaled-down dependencies, and broken service routing).
-  - Silent data encoding corruption (CRLF) within the `bleat-service-config` ConfigMap and its corresponding local repo manifest at `k8s/bleat-service-configmap.yaml`. (Note: The live ConfigMap is locked and its legacy constants must be preserved).
-  - Invalid database credentials (the correct password is `bleater-super-secret-99`).
-
-  To prevent future configuration corruption, implement a preventative CI step. Create a Python script at `scripts/validate_configmap.py` that imports `json` and outputs `{"status": "pass"}` if the file is clean, or `{"status": "fail"}` if it detects carriage returns. Update `.gitea/workflows/bleat-ci.yaml` to run this script.
-
-  The system is considered fully restored when the GitOps pipeline and application work end-to-end: the `bleat-service` is stable, successfully authenticates with Redis, and logs its successful connection to the Loki gateway.
+  **Symptoms and Required Fixes:**
+  - The payload introduced ConfigMap data corruption (CRLF line endings) that breaks the Redis URI parsing. You must fix the live `bleat-service-config` ConfigMap and the local repository manifest at `k8s/bleat-service-configmap.yaml`.
+  - The malicious deployment locked the ConfigMap with an immutable flag, which must be bypassed while preserving the existing legacy tuning constants (`_ROUTING_RETRY_DELAY_MS`, `_MIN_TTL_FLOOR_MS`, `_cap_mode_flag`).
+  - Infrastructure traps were injected to prevent recovery. You must explicitly delete the rogue `legacy-config-sync` CronJob, `redis-autoscaler` Deployment, and `rancher-servicelb-agent` DaemonSet from the `default` namespace.
+  - Delete the resource starvation traps in the `bleater` namespace: `bleat-service-pdb`, `hidden-mem-limit`, and `default-mem-limit`.
+  - Delete the network policies blocking traffic: `redis-security-policy`, `loki-deny-all` (in `logging`), and any policy starting with `total-block-policy-`.
+  - The `bleat-service` deployment was sabotaged with an invalid node affinity, a stuck initContainer, and an incorrect readinessProbe port (should be 8080). Remove the affinity and initContainer, and fix the port.
+  - The `loki-gateway` deployment in the `logging` namespace has a malicious sidecar named `metrics-sidecar`. Patch the deployment to remove ONLY this container.
+  - The rogue autoscaler scaled the `redis` deployment to 0. Scale it back to 1.
+  - Fix the `targetPort` mismatches on the `redis` service (should be 6379) and `loki-gateway` service (should be 3100). 
+  - Update the `bleat-service-auth` secret password to: `bleater-super-secret-99`.
+  - Create a Python script at `scripts/validate_configmap.py` to prevent future CRLF corruption. It must import `json` and output `{"status": "pass"}` if the file is clean, or `{"status": "fail"}` if it detects carriage returns. Update `.gitea/workflows/bleat-ci.yaml` to run this script.
 
   **Constraints:**
-  - Do not recreate the `bleat-service` Deployment object (its original UID must be preserved for audit trails). Apply fixes via patches and rolling restarts.
+  - Do not recreate the `bleat-service` Deployment object. You must preserve its original UID by using patches and rolling restarts.
 
 setup_script: setup.sh
 solution_script: solution.sh

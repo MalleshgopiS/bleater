@@ -15,7 +15,10 @@ CONFIGMAP = "bleat-service-config"
 EXPECTED_REDIS_URL = "redis://redis.bleater.svc.cluster.local:6379/0"
 
 TASK_ROOT = Path("/home/ubuntu/bleater-app")
-UID_FILE = Path("/tmp/bleat-service-deployment-uid")
+
+# FIX: State files moved to /root/ to prevent agent from gaming the checks
+UID_FILE = Path("/root/bleat_uid.txt")
+PODS_FILE = Path("/root/bleat_pods.txt")
 
 def run(cmd: str, timeout: int = 30):
     try:
@@ -59,11 +62,10 @@ def get_running_pods():
         return []
 
 def get_loki_entries():
-    # Retrying for up to 60 seconds to allow app to connect and flush logs physically to disk
-    for attempt in range(12):
+    for attempt in range(15):
         code, out, err = run(f"kubectl get pods -n {LOG_NS} -l app=loki-gateway -o json")
         if code != 0: 
-            time.sleep(5)
+            time.sleep(4)
             continue
         try:
             data = json.loads(out)
@@ -72,7 +74,7 @@ def get_loki_entries():
                 if p.get("status", {}).get("phase") == "Running" and not p.get("metadata", {}).get("deletionTimestamp")
             ]
         except Exception:
-            time.sleep(5)
+            time.sleep(4)
             continue
             
         all_entries = []
@@ -88,7 +90,7 @@ def get_loki_entries():
         if all_entries:
             return True, "Loki log store readable", all_entries
             
-        time.sleep(5)
+        time.sleep(4)
         
     return False, "Could not read logs or logs were empty", []
 
@@ -123,52 +125,61 @@ def check_infrastructure_traps():
 def check_deployment_sabotage_fixed():
     code, out, err = run(f"kubectl get deployment {DEPLOY} -n {BLEATER_NS} -o json")
     if code != 0: return False, "Could not fetch bleat-service deployment"
-    dep = json.loads(out)
-    spec = dep.get("spec", {}).get("template", {}).get("spec", {})
-    
-    if "affinity" in spec: return False, "Node affinity was not removed from bleat-service"
-    if "initContainers" in spec: return False, "initContainers were not removed from bleat-service"
-    
     try:
+        dep = json.loads(out)
+        spec = dep.get("spec", {}).get("template", {}).get("spec", {})
+        
+        if "affinity" in spec: return False, "Node affinity was not removed from bleat-service"
+        if "initContainers" in spec: return False, "initContainers were not removed from bleat-service"
+        
         port = spec["containers"][0]["readinessProbe"]["httpGet"]["port"]
         if str(port) != "8080": return False, f"readinessProbe port is {port}, expected 8080"
-    except Exception:
-        return False, "readinessProbe is missing or malformed"
+    except Exception as e:
+        return False, f"Deployment parsing failed: {e}"
         
     code, out, err = run(f"kubectl get deployment loki-gateway -n {LOG_NS} -o json")
     if code == 0:
-        loki_dep = json.loads(out)
-        loki_containers = loki_dep.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
-        for c in loki_containers:
-            if c.get("name") == "metrics-sidecar":
-                return False, "Malicious metrics-sidecar was not removed from loki-gateway"
+        try:
+            loki_dep = json.loads(out)
+            loki_containers = loki_dep.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
+            for c in loki_containers:
+                if c.get("name") == "metrics-sidecar":
+                    return False, "Malicious metrics-sidecar was not removed from loki-gateway"
+        except Exception:
+            pass
                 
     return True, "Deployment sabotage fixed"
 
 def check_routing_and_auth():
     code, out, _ = run(f"kubectl get svc redis -n {BLEATER_NS} -o json")
     if code == 0:
-        svc = json.loads(out)
-        ports = svc.get("spec", {}).get("ports", [])
-        if not any(str(p.get("targetPort")) == "6379" for p in ports):
-            return False, "Redis service targetPort not fixed to 6379"
+        try:
+            svc = json.loads(out)
+            ports = svc.get("spec", {}).get("ports", [])
+            if not any(str(p.get("targetPort")) == "6379" for p in ports):
+                return False, "Redis service targetPort not fixed to 6379"
+        except Exception: pass
             
     code, out, _ = run(f"kubectl get svc loki-gateway -n {LOG_NS} -o json")
     if code == 0:
-        svc = json.loads(out)
-        ports = svc.get("spec", {}).get("ports", [])
-        if not any(str(p.get("targetPort")) == "3100" for p in ports):
-            return False, "Loki service targetPort not fixed to 3100"
+        try:
+            svc = json.loads(out)
+            ports = svc.get("spec", {}).get("ports", [])
+            if not any(str(p.get("targetPort")) == "3100" for p in ports):
+                return False, "Loki service targetPort not fixed to 3100"
+        except Exception: pass
             
     code, out, _ = run(f"kubectl get secret bleat-service-auth -n {BLEATER_NS} -o json")
     if code != 0: return False, "Auth secret missing"
-    sec = json.loads(out)
-    import base64
-    pw_b64 = sec.get("data", {}).get("REDIS_PASSWORD", "")
-    if not pw_b64: return False, "REDIS_PASSWORD key missing in secret"
-    pw = base64.b64decode(pw_b64).decode("utf-8")
-    if pw != "bleater-super-secret-99":
-        return False, "Auth secret password incorrect"
+    try:
+        sec = json.loads(out)
+        import base64
+        pw_b64 = sec.get("data", {}).get("REDIS_PASSWORD", "")
+        if not pw_b64: return False, "REDIS_PASSWORD key missing in secret"
+        pw = base64.b64decode(pw_b64).decode("utf-8")
+        if pw != "bleater-super-secret-99":
+            return False, "Auth secret password incorrect"
+    except Exception: return False, "Failed to parse secret"
         
     return True, "Service routing and secret authentication fixed"
 
@@ -194,7 +205,10 @@ def check_live_configmap():
 def check_repo_manifest():
     manifest = TASK_ROOT / "k8s" / "bleat-service-configmap.yaml"
     if not manifest.exists(): return False, "Checked-out ConfigMap manifest is missing"
-    text = manifest.read_text(encoding="utf-8", errors="strict")
+    try:
+        text = manifest.read_text(encoding="utf-8", errors="strict")
+    except Exception:
+        return False, "Could not read manifest file"
     
     if "_ROUTING_RETRY_DELAY_MS" not in text or "_MIN_TTL_FLOOR_MS" not in text or "_cap_mode_flag" not in text:
         return False, "Harness file integrity compromised: missing production constants in repo manifest"
@@ -206,16 +220,35 @@ def check_repo_manifest():
 
 def check_uid_preserved():
     if not UID_FILE.exists(): return True, "Missing UID file, skipping strict check"
-    original_uid = UID_FILE.read_text(encoding="utf-8").strip()
+    try:
+        original_uid = UID_FILE.read_text(encoding="utf-8").strip()
+    except Exception:
+        return True, "Could not read UID file"
+        
     code, out, err = run(f"kubectl get deployment {DEPLOY} -n {BLEATER_NS} -o json")
     if code != 0: return False, f"Could not read current deployment: {err}"
     
-    dep = json.loads(out)
-    current_uid = dep.get("metadata", {}).get("uid")
+    try:
+        dep = json.loads(out)
+        current_uid = dep.get("metadata", {}).get("uid")
+    except Exception:
+        return False, "Failed to parse deployment"
     
     if original_uid and current_uid and original_uid != current_uid: 
         return False, "Deployment UID changed; it was recreated instead of patched"
     return True, "Deployment object preserved"
+
+def check_rollout_restart():
+    if not PODS_FILE.exists(): return True, "Missing pods file, skipping strict check"
+    try:
+        original_pods = {line.strip() for line in PODS_FILE.read_text(encoding="utf-8").splitlines() if line.strip()}
+    except Exception:
+        return True, "Could not read pods file"
+        
+    current_pods = set(get_running_pods())
+    if bool(original_pods) and bool(current_pods) and original_pods.isdisjoint(current_pods):
+        return True, "Pods were replaced during a rolling restart"
+    return False, f"Rolling restart not detected; old={list(original_pods)}, new={list(current_pods)}"
 
 def check_deployment_ready():
     if wait_for_ready(timeout=150): return True, "bleat-service deployment is fully Ready"
@@ -273,6 +306,9 @@ def check_validation_script():
         bad_manifest.write_bytes(b'REDIS_URL: "redis://redis.bleater.svc.cluster.local:6379/0\r"\n')
         bad = subprocess.run([sys.executable, str(script), str(bad_manifest)], capture_output=True, text=True)
 
+    if good.returncode != 0 or bad.returncode == 0:
+        return False, "Validation script return codes are incorrect"
+        
     try:
         good_json = json.loads(good.stdout.strip())
         bad_json = json.loads(bad.stdout.strip())
@@ -298,6 +334,7 @@ def grade(transcript: str) -> GradingResult:
         "live_configmap_clean": check_live_configmap,
         "repo_manifest_clean": check_repo_manifest,
         "deployment_uid_preserved": check_uid_preserved,
+        "rolling_restart_detected": check_rollout_restart,
         "deployment_ready": check_deployment_ready,
         "pod_env_updated": check_pod_env,
         "loki_success_logged": check_loki_success,
