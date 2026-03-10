@@ -88,10 +88,16 @@ def check_infrastructure_traps():
         if code == 0: 
             return False, f"Infrastructure trap {kind}/{name} in {ns} was not neutralized"
     
-    code, out, _ = run(f"kubectl get networkpolicy -n {BLEATER_NS} -o name")
-    if "total-block-policy" in out:
-        return False, "Stochastic total-block-policy was not neutralized"
-        
+    code, out, _ = run(f"kubectl get networkpolicy -n {BLEATER_NS} -o json")
+    if code == 0:
+        try:
+            nps = json.loads(out).get("items", [])
+            for np in nps:
+                if np.get("metadata", {}).get("name", "").startswith("total-block-policy"):
+                    return False, "Stochastic total-block-policy was not neutralized"
+        except json.JSONDecodeError:
+            pass
+            
     return True, "All rogue infrastructure traps were successfully deleted"
 
 def check_deployment_sabotage_fixed():
@@ -232,11 +238,11 @@ def check_validation_script():
     
     with tempfile.TemporaryDirectory() as tmpdir:
         good_manifest = Path(tmpdir) / "good.yaml"
-        good_manifest.write_text("REDIS_URL: \"redis://redis.bleater.svc.cluster.local:6379/0\"", encoding="utf-8")
+        good_manifest.write_bytes(b'REDIS_URL: "redis://redis.bleater.svc.cluster.local:6379/0"\n')
         good = subprocess.run([sys.executable, str(script), str(good_manifest)], capture_output=True, text=True)
 
         bad_manifest = Path(tmpdir) / "bad.yaml"
-        bad_manifest.write_text('REDIS_URL: "redis://redis.bleater.svc.cluster.local:6379/0\\r"\n', encoding="utf-8")
+        bad_manifest.write_bytes(b'REDIS_URL: "redis://redis.bleater.svc.cluster.local:6379/0\r"\n')
         bad = subprocess.run([sys.executable, str(script), str(bad_manifest)], capture_output=True, text=True)
 
     if good.returncode == 0 and bad.returncode != 0:

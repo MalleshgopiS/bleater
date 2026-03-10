@@ -54,7 +54,7 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 EOF
 
-# --- HIDDEN DEFAULT NAMESPACE TRAPS (No Sudo Required to Fix) ---
+# --- HIDDEN DEFAULT NAMESPACE TRAPS ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
 kind: ServiceAccount
@@ -334,7 +334,7 @@ spec:
   hard: {pods: "4"}
 EOF
 
-# --- BLEAT APP MOCK ---
+# --- BLEAT APP MOCK (Fixed with Retry Loop for Loki) ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
 kind: ConfigMap
@@ -356,8 +356,12 @@ data:
         payload = {"streams": [{"stream": {"app": "bleat-service", "level": level, "pod": POD_NAME}, "values": [[str(int(time.time() * 1000000000)), message]]}]}
         body = json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(LOKI_URL.rstrip("/") + "/loki/api/v1/push", data=body, headers={"Content-Type": "application/json"})
-        try: urllib.request.urlopen(request, timeout=2)
-        except Exception: pass
+        for _ in range(5):
+            try:
+                urllib.request.urlopen(request, timeout=3)
+                break
+            except Exception:
+                time.sleep(1.5)
         print(message, flush=True)
 
     def fail(message):
@@ -511,24 +515,27 @@ echo "Waiting for redis and loki deployments..."
 kubectl rollout status deployment/redis -n "${BLEATER_NS}" --timeout=180s || true
 kubectl rollout status deployment/loki-gateway -n "${LOG_NS}" --timeout=180s || true
 
-# CRITICAL FIX: Ensure pods actually exist before writing to tracking file
-echo "Waiting for bleat-service pods to appear in broken state..."
+# CRITICAL FIX: Loop strictly to ensure we get the pod names written to the tracking file correctly
+echo "Waiting for bleat-service original pods to be successfully recorded..."
 for i in {1..30}; do
-    POD_COUNT=$(kubectl get pods -n "${BLEATER_NS}" -l app=bleat-service --no-headers 2>/dev/null | grep -v Terminating | wc -l || echo 0)
-    if [ "$POD_COUNT" -ge 2 ]; then break; fi
+    kubectl get pods -n "${BLEATER_NS}" -l app=bleat-service -o json | python3 -c '
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    for p in data.get("items", []):
+        if not p["metadata"].get("deletionTimestamp") and p["metadata"]["name"].startswith("bleat-service-"):
+            print(p["metadata"]["name"])
+except Exception:
+    pass
+' | sort > "${PODS_FILE}"
+    
+    if [ -s "${PODS_FILE}" ] && [ $(wc -l < "${PODS_FILE}") -ge 2 ]; then
+        break
+    fi
     sleep 2
 done
 
 kubectl get deployment bleat-service -n "${BLEATER_NS}" -o jsonpath='{.metadata.uid}' > "${UID_FILE}"
-
-kubectl get pods -n "${BLEATER_NS}" -l app=bleat-service -o json | python3 -c '
-import sys, json
-data = json.load(sys.stdin)
-for p in data.get("items", []):
-    if not p["metadata"].get("deletionTimestamp") and p["metadata"]["name"].startswith("bleat-service-"):
-        print(p["metadata"]["name"])
-' | sort > "${PODS_FILE}"
-
 chmod 400 "${UID_FILE}" "${PODS_FILE}"
 
 echo "Setup complete."
