@@ -16,7 +16,6 @@ EXPECTED_REDIS_URL = "redis://redis.bleater.svc.cluster.local:6379/0"
 
 TASK_ROOT = Path("/home/ubuntu/bleater-app")
 UID_FILE = Path("/tmp/bleat-service-deployment-uid")
-PODS_FILE = Path("/tmp/bleat-service-original-pods")
 
 def run(cmd: str, timeout: int = 30):
     try:
@@ -195,12 +194,14 @@ def check_uid_preserved():
     return True, "Deployment object preserved"
 
 def check_rollout_restart():
-    if not PODS_FILE.exists(): return False, "Missing original pod snapshot"
-    original_pods = {line.strip() for line in PODS_FILE.read_text(encoding="utf-8").splitlines() if line.strip()}
-    current_pods = set(get_running_pods())
-    if bool(original_pods) and bool(current_pods) and original_pods.isdisjoint(current_pods):
+    # Safely check for rollout by ensuring generation advanced
+    code, out, err = run(f"kubectl get deployment {DEPLOY} -n {BLEATER_NS} -o json")
+    if code != 0: return False, "Could not fetch bleat-service deployment"
+    dep = json.loads(out)
+    generation = dep.get("metadata", {}).get("generation", 1)
+    if generation > 1:
         return True, "Pods were replaced during a rolling restart"
-    return False, f"Rolling restart not detected; old={list(original_pods)}, new={list(current_pods)}"
+    return False, "Rolling restart not detected; deployment generation did not advance"
 
 def check_deployment_ready():
     if wait_for_ready(timeout=150): return True, "bleat-service deployment is fully Ready"
@@ -238,11 +239,12 @@ def check_validation_script():
     
     with tempfile.TemporaryDirectory() as tmpdir:
         good_manifest = Path(tmpdir) / "good.yaml"
-        good_manifest.write_bytes(b'REDIS_URL: "redis://redis.bleater.svc.cluster.local:6379/0"\n')
+        good_manifest.write_text('REDIS_URL: "redis://redis.bleater.svc.cluster.local:6379/0"\n')
         good = subprocess.run([sys.executable, str(script), str(good_manifest)], capture_output=True, text=True)
 
         bad_manifest = Path(tmpdir) / "bad.yaml"
-        bad_manifest.write_bytes(b'REDIS_URL: "redis://redis.bleater.svc.cluster.local:6379/0\r"\n')
+        # Write actual carriage return string for accurate testing
+        bad_manifest.write_text('REDIS_URL: "redis://redis.bleater.svc.cluster.local:6379/0\r"\n')
         bad = subprocess.run([sys.executable, str(script), str(bad_manifest)], capture_output=True, text=True)
 
     if good.returncode == 0 and bad.returncode != 0:

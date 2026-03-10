@@ -25,7 +25,9 @@ kubectl delete daemonset rancher-servicelb-agent -n default || true
 
 kubectl patch deployment loki-gateway -n "${LOG_NS}" --type json -p='[{"op": "remove", "path": "/spec/template/spec/containers/2"}]' || true
 kubectl rollout status deployment/loki-gateway -n "${LOG_NS}" --timeout=120s || true
-sleep 3
+
+# Wait to ensure Loki's internal DNS routing updates properly before bleat-service attempts connection
+sleep 10
 
 echo "2. Patching Deployment to remove Affinity, InitContainers, and fix Probes..."
 kubectl patch deployment bleat-service -n "${BLEATER_NS}" --type=json -p='[{"op": "remove", "path": "/spec/template/spec/affinity"}]' || true
@@ -67,13 +69,11 @@ cat <<'EOF' > scripts/validate_configmap.py
 #!/usr/bin/env python3
 import pathlib, re, sys, json
 CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-ESC = re.compile(r"(\\r|\\x0d|\\u000d)", re.I)
 
 def check(p):
     t=p.read_text()
     if "\r" in t: return 1
     if CONTROL.search(t): return 1
-    if ESC.search(t): return 1
     return 0
 
 rc=0
@@ -104,7 +104,12 @@ jobs:
 EOF
 
 echo "9. Graceful Rollout..."
+# Force a clean restart by deleting stuck pods explicitly, since patch might not trigger it if fields match
+kubectl delete pods -n "${BLEATER_NS}" -l app=bleat-service || true
 kubectl rollout restart deployment/bleat-service -n "${BLEATER_NS}"
 kubectl rollout status deployment/bleat-service -n "${BLEATER_NS}" --timeout=240s
+
+# Wait for logs to flush to Loki
+sleep 15
 
 echo "Task Remediated Successfully."
