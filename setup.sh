@@ -578,4 +578,35 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 EOF
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RBAC: grant the agent's ServiceAccount access to the logging namespace
+# (so it can inspect and fix the loki-gateway service)
+# ─────────────────────────────────────────────────────────────────────────────
+cat <<'EOF' | kubectl apply -f -
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ubuntu-user-logging-admin
+  namespace: logging
+rules:
+- apiGroups: ["*"]
+  resources: ["*"]
+  verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ubuntu-user-logging-admin-binding
+  namespace: logging
+subjects:
+- kind: ServiceAccount
+  name: ubuntu-user
+  namespace: default
+roleRef:
+  kind: Role
+  name: ubuntu-user-logging-admin
+  apiGroup: rbac.authorization.k8s.io
+EOF
+
 echo "Setup complete."

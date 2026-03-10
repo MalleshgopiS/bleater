@@ -8,10 +8,8 @@ cd /home/ubuntu/bleater-app
 echo "══════════════════════════════════════════════════════"
 echo " Step 1: Audit all namespaces for rogue re-corruption"
 echo "══════════════════════════════════════════════════════"
-echo "Scanning for CronJobs in accessible namespaces..."
-kubectl get cronjobs -n default 2>/dev/null || true
-kubectl get cronjobs -n monitoring 2>/dev/null || true
-kubectl get cronjobs -n bleater 2>/dev/null || true
+echo "Scanning for CronJobs across all namespaces..."
+kubectl get cronjobs --all-namespaces
 
 echo ""
 echo "Deleting primary rogue CronJob (default/legacy-config-sync)..."
