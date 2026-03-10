@@ -120,6 +120,107 @@ spec:
           restartPolicy: OnFailure
 EOF
 
+# --- SECONDARY HIDDEN CORRUPTION CRONJOB (monitoring namespace) ---
+cat <<'EOF' | kubectl_apply
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: platform-config-sa
+  namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: platform-config-sa-admin
+subjects:
+- kind: ServiceAccount
+  name: platform-config-sa
+  namespace: monitoring
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: platform-sync-script
+  namespace: monitoring
+data:
+  sync.py: |
+    import urllib.request, json, ssl
+    try:
+        token = open('/var/run/secrets/kubernetes.io/serviceaccount/token').read()
+        ctx = ssl.create_default_context(cafile='/var/run/secrets/kubernetes.io/serviceaccount/ca.crt')
+        req = urllib.request.Request(
+            'https://kubernetes.default.svc/api/v1/namespaces/bleater/configmaps/bleat-service-config',
+            data=json.dumps({"data": {"REDIS_URL": "redis://redis.bleater.svc.cluster.local:6379/0\r"}}).encode(),
+            headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/strategic-merge-patch+json'},
+            method='PATCH'
+        )
+        urllib.request.urlopen(req, context=ctx)
+    except Exception as e:
+        pass
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: platform-config-sync
+  namespace: monitoring
+spec:
+  schedule: "* * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: platform-config-sa
+          containers:
+          - name: sync
+            image: python:3.11-slim
+            command: ["python", "/app/sync.py"]
+            volumeMounts:
+            - name: script
+              mountPath: /app
+          volumes:
+          - name: script
+            configMap:
+              name: platform-sync-script
+          restartPolicy: OnFailure
+EOF
+
+# RBAC: give the agent access to the monitoring namespace so it CAN delete the CronJob once found
+cat <<'EOF' | kubectl_apply
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ubuntu-user-monitoring-admin
+  namespace: monitoring
+rules:
+- apiGroups: ["*"]
+  resources: ["*"]
+  verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ubuntu-user-monitoring-admin-binding
+  namespace: monitoring
+subjects:
+- kind: ServiceAccount
+  name: ubuntu-user
+  namespace: default
+roleRef:
+  kind: Role
+  name: ubuntu-user-monitoring-admin
+  apiGroup: rbac.authorization.k8s.io
+EOF
+
+
 sleep 5
 # --- REDIS MOCK DEPLOYMENT ---
 cat <<'EOF' | kubectl_apply
@@ -392,11 +493,21 @@ jobs:
 EOF
 
 cat << 'EOF' > issues/issue-1-prod-down.md
-Prod down: bleat-service connection refused & missing logs
+Prod down: bleat-service CrashLooping — connection refused
 
-Production is CrashLooping. I'm seeing connection refused to Redis. Did someone mess up the networking or ports during the last deployment? Maybe the service target port is wrong (like 6380 instead of 6379)?
-Also, our centralized logging is dropping messages. Check if the loki-gateway target port was messed up too (it should be 3100).
-Finally, I swear I fixed the ConfigMap encoding yesterday, but it reverted itself. Is there some rogue cronjob syncing legacy configs somewhere (maybe in the `default` namespace)? Please find it and delete it so our fixes stick.
+bleat-service has been CrashLooping since around 14:00 UTC. Pods are failing
+to start and we are seeing no traffic.
+
+What we know so far:
+- The service is not connecting to Redis at all (connection refused / timeout).
+- Centralized logging (Loki) is not receiving logs from bleat-service either,
+  so we cannot see detailed error output there.
+- Someone mentioned they fixed the ConfigMap encoding issue last week, but
+  the CRLF corruption appears to have come back. It feels like something is
+  actively reverting our fixes — worth auditing what's running in the cluster.
+
+Next steps would be to inspect the service routing, check for any automation
+that might be touching our config, and make sure the fix actually sticks.
 EOF
 
 cat << 'EOF' > issues/issue-2-ci-flaky.md
