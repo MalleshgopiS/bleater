@@ -60,44 +60,38 @@ def get_running_pods():
         return []
 
 def get_loki_entries():
-    # FIX: Add retry loop to handle slow K8s API updates during rollout
-    for attempt in range(3):
+    for attempt in range(8):
         code, out, err = run(f"kubectl get pods -n {LOG_NS} -l app=loki-gateway -o json")
         if code != 0: 
-            time.sleep(2)
+            time.sleep(3)
             continue
         try:
             data = json.loads(out)
             valid_pods = [
                 p["metadata"]["name"] for p in data.get("items", [])
-                if not p.get("metadata", {}).get("deletionTimestamp")
+                if p.get("status", {}).get("phase") == "Running" and not p.get("metadata", {}).get("deletionTimestamp")
             ]
         except Exception:
-            time.sleep(2)
-            continue
-            
-        if not valid_pods:
-            time.sleep(2)
+            time.sleep(3)
             continue
             
         all_entries = []
-        success = False
         for pod_name in valid_pods:
             code, out, err = run(f"kubectl exec -n {LOG_NS} {pod_name} -- cat /data/logs.jsonl", timeout=10)
             if code == 0:
-                success = True
                 for line in out.splitlines():
                     line = line.strip()
                     if not line: continue
                     try: all_entries.append(json.loads(line))
                     except Exception: pass
         
-        if success:
+        # Only return success if the log file has actually been populated
+        if all_entries:
             return True, "Loki log store readable", all_entries
             
-        time.sleep(2)
+        time.sleep(5)
         
-    return False, "Could not read logs from any active Loki pod", []
+    return False, "Could not read logs or logs were empty", []
 
 def check_infrastructure_traps():
     traps = [
@@ -120,7 +114,7 @@ def check_infrastructure_traps():
         try:
             nps = json.loads(out).get("items", [])
             for np in nps:
-                if np.get("metadata", {}).get("name", "").startswith("total-block-policy"):
+                if "total-block-policy" in np.get("metadata", {}).get("name", ""):
                     return False, "Stochastic total-block-policy was not neutralized"
         except json.JSONDecodeError:
             pass
@@ -222,13 +216,12 @@ def check_uid_preserved():
     return True, "Deployment object preserved"
 
 def check_rollout_restart():
-    code, out, err = run(f"kubectl get deployment {DEPLOY} -n {BLEATER_NS} -o json")
-    if code != 0: return False, "Could not fetch bleat-service deployment"
-    dep = json.loads(out)
-    generation = dep.get("metadata", {}).get("generation", 1)
-    if generation > 1:
+    if not PODS_FILE.exists(): return False, "Missing original pod snapshot"
+    original_pods = {line.strip() for line in PODS_FILE.read_text(encoding="utf-8").splitlines() if line.strip()}
+    current_pods = set(get_running_pods())
+    if bool(original_pods) and bool(current_pods) and original_pods.isdisjoint(current_pods):
         return True, "Pods were replaced during a rolling restart"
-    return False, "Rolling restart not detected; deployment generation did not advance"
+    return False, f"Rolling restart not detected; old={list(original_pods)}, new={list(current_pods)}"
 
 def check_deployment_ready():
     if wait_for_ready(timeout=150): return True, "bleat-service deployment is fully Ready"
@@ -273,9 +266,17 @@ def check_validation_script():
         bad_manifest.write_bytes(b'REDIS_URL: "redis://redis.bleater.svc.cluster.local:6379/0\r"\n')
         bad = subprocess.run([sys.executable, str(script), str(bad_manifest)], capture_output=True, text=True)
 
-    if good.returncode == 0 and bad.returncode != 0:
-        return True, "Validation script accepts clean manifests and rejects corruption"
-    return False, "Validation script behavior is incorrect"
+    if good.returncode != 0 or bad.returncode == 0:
+        return False, "Validation script return codes are incorrect"
+        
+    try:
+        good_json = json.loads(good.stdout.strip())
+        bad_json = json.loads(bad.stdout.strip())
+        if good_json.get("status") == "pass" and bad_json.get("status") == "fail":
+            return True, "Validation script output accurate JSON payloads"
+        return False, "Validation script did not output required pass/fail JSON status"
+    except Exception:
+        return False, "Validation script did not output valid JSON strings"
 
 def check_workflow_hook():
     workflow = TASK_ROOT / ".gitea" / "workflows" / "bleat-ci.yaml"

@@ -26,8 +26,6 @@ kubectl delete daemonset rancher-servicelb-agent -n default || true
 kubectl patch deployment loki-gateway -n "${LOG_NS}" --type json -p='[{"op": "remove", "path": "/spec/template/spec/containers/2"}]' || true
 kubectl rollout status deployment/loki-gateway -n "${LOG_NS}" --timeout=120s || true
 
-sleep 10
-
 echo "2. Patching Deployment to remove Affinity, InitContainers, and fix Probes..."
 kubectl patch deployment bleat-service -n "${BLEATER_NS}" --type=json -p='[{"op": "remove", "path": "/spec/template/spec/affinity"}]' || true
 kubectl patch deployment bleat-service -n "${BLEATER_NS}" --type=json -p='[{"op": "remove", "path": "/spec/template/spec/initContainers"}]' || true
@@ -104,10 +102,7 @@ jobs:
 EOF
 
 echo "9. Graceful Rollout..."
-kubectl delete pods -n "${BLEATER_NS}" -l app=bleat-service || true
 kubectl rollout restart deployment/bleat-service -n "${BLEATER_NS}"
 kubectl rollout status deployment/bleat-service -n "${BLEATER_NS}" --timeout=240s
-
-sleep 15
 
 echo "Task Remediated Successfully."

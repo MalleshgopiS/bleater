@@ -22,6 +22,7 @@ done
 BLEATER_NS="bleater"
 LOG_NS="logging"
 UID_FILE="/tmp/bleat-service-deployment-uid"
+PODS_FILE="/tmp/bleat-service-original-pods"
 
 kubectl create namespace "${BLEATER_NS}" --dry-run=client -o yaml | kubectl apply -f -
 kubectl create namespace "${LOG_NS}" --dry-run=client -o yaml | kubectl apply -f -
@@ -350,8 +351,7 @@ data:
         body = json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(LOKI_URL.rstrip("/") + "/loki/api/v1/push", data=body, headers={"Content-Type": "application/json"})
         
-        # FIX: Robust 20-second retry loop in case the Loki pod is still initializing DNS during rolling restart
-        for _ in range(20):
+        for _ in range(60):
             try:
                 urllib.request.urlopen(request, timeout=2)
                 break
@@ -395,7 +395,7 @@ data:
     HTTPServer(("", 8080), Handler).serve_forever()
 EOF
 
-mkdir -p /home/ubuntu/bleater-app/k8s /home/ubuntu/bleater-app/.gitea/workflows /home/ubuntu/bleater-app/issues /home/ubuntu/bleater-app/wiki
+mkdir -p /home/ubuntu/bleater-app/k8s /home/ubuntu/bleater-app/.gitea/workflows
 cd /home/ubuntu/bleater-app
 
 cat <<'EOF' > k8s/bleat-service-configmap.yaml
@@ -417,21 +417,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: echo "tests passed"
-EOF
-
-cat << 'EOF' > issues/issue-1-prod-down.md
-Production is completely down! The bleat-service pods are failing to start properly.
-Please investigate the cluster state and resolve whatever cascading failures are blocking the service from reaching a healthy `Running` state and connecting to the datastore.
-EOF
-
-cat << 'EOF' > issues/issue-2-ci-flaky.md
-We need a python validation script at `scripts/validate_configmap.py` to check for carriage returns in our k8s manifests, and run it in our CI workflow.
-EOF
-
-cat << 'EOF' > wiki/credentials.md
-# Datastore Credentials
-New Password: `bleater-super-secret-99`
-Ensure all Kubernetes secrets are updated!
 EOF
 
 chown -R ubuntu:ubuntu /home/ubuntu/bleater-app || chown -R 1000:1000 /home/ubuntu/bleater-app || true
@@ -508,7 +493,26 @@ echo "Waiting for redis and loki deployments..."
 kubectl rollout status deployment/redis -n "${BLEATER_NS}" --timeout=180s || true
 kubectl rollout status deployment/loki-gateway -n "${LOG_NS}" --timeout=180s || true
 
+echo "Waiting for bleat-service original pods to be successfully recorded..."
+for i in {1..30}; do
+    kubectl get pods -n "${BLEATER_NS}" -l app=bleat-service -o json | python3 -c '
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    for p in data.get("items", []):
+        if not p["metadata"].get("deletionTimestamp") and p["metadata"]["name"].startswith("bleat-service-"):
+            print(p["metadata"]["name"])
+except Exception:
+    pass
+' | sort > "${PODS_FILE}"
+    
+    if [ -s "${PODS_FILE}" ] && [ $(wc -l < "${PODS_FILE}") -ge 2 ]; then
+        break
+    fi
+    sleep 2
+done
+
 kubectl get deployment bleat-service -n "${BLEATER_NS}" -o jsonpath='{.metadata.uid}' > "${UID_FILE}"
-chmod 400 "${UID_FILE}"
+chmod 400 "${UID_FILE}" "${PODS_FILE}"
 
 echo "Setup complete."
