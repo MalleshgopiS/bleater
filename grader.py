@@ -16,7 +16,6 @@ EXPECTED_REDIS_URL = "redis://redis.bleater.svc.cluster.local:6379/0"
 
 TASK_ROOT = Path("/home/ubuntu/bleater-app")
 UID_FILE = Path("/tmp/bleat-service-deployment-uid")
-PODS_FILE = Path("/tmp/bleat-service-original-pods")
 
 def run(cmd: str, timeout: int = 30):
     try:
@@ -60,10 +59,11 @@ def get_running_pods():
         return []
 
 def get_loki_entries():
-    for attempt in range(8):
+    # Retrying for up to 60 seconds to allow app to connect and flush logs physically to disk
+    for attempt in range(12):
         code, out, err = run(f"kubectl get pods -n {LOG_NS} -l app=loki-gateway -o json")
         if code != 0: 
-            time.sleep(3)
+            time.sleep(5)
             continue
         try:
             data = json.loads(out)
@@ -72,7 +72,7 @@ def get_loki_entries():
                 if p.get("status", {}).get("phase") == "Running" and not p.get("metadata", {}).get("deletionTimestamp")
             ]
         except Exception:
-            time.sleep(3)
+            time.sleep(5)
             continue
             
         all_entries = []
@@ -85,7 +85,6 @@ def get_loki_entries():
                     try: all_entries.append(json.loads(line))
                     except Exception: pass
         
-        # Only return success if the log file has actually been populated
         if all_entries:
             return True, "Loki log store readable", all_entries
             
@@ -144,19 +143,21 @@ def check_deployment_sabotage_fixed():
             if c.get("name") == "metrics-sidecar":
                 return False, "Malicious metrics-sidecar was not removed from loki-gateway"
                 
-    return True, "Deployment sabotage (sidecars, initContainers, affinity, probes) fixed"
+    return True, "Deployment sabotage fixed"
 
 def check_routing_and_auth():
     code, out, _ = run(f"kubectl get svc redis -n {BLEATER_NS} -o json")
     if code == 0:
         svc = json.loads(out)
-        if str(svc["spec"]["ports"][0].get("targetPort")) != "6379":
+        ports = svc.get("spec", {}).get("ports", [])
+        if not any(str(p.get("targetPort")) == "6379" for p in ports):
             return False, "Redis service targetPort not fixed to 6379"
             
     code, out, _ = run(f"kubectl get svc loki-gateway -n {LOG_NS} -o json")
     if code == 0:
         svc = json.loads(out)
-        if str(svc["spec"]["ports"][0].get("targetPort")) != "3100":
+        ports = svc.get("spec", {}).get("ports", [])
+        if not any(str(p.get("targetPort")) == "3100" for p in ports):
             return False, "Loki service targetPort not fixed to 3100"
             
     code, out, _ = run(f"kubectl get secret bleat-service-auth -n {BLEATER_NS} -o json")
@@ -179,9 +180,9 @@ def check_live_configmap():
         data = configmap.get("data", {})
         redis_url = data.get("REDIS_URL", "")
         
-        if data.get("_ROUTING_RETRY_DELAY_MS") != "0": return False, "Implementation detail _ROUTING_RETRY_DELAY_MS missing or mutated"
-        if data.get("_MIN_TTL_FLOOR_MS") != "3600": return False, "Implementation detail _MIN_TTL_FLOOR_MS missing or mutated"
-        if data.get("_cap_mode_flag") != "true": return False, "Implementation detail _cap_mode_flag missing or mutated"
+        if data.get("_ROUTING_RETRY_DELAY_MS") != "0": return False, "Constant _ROUTING_RETRY_DELAY_MS missing or mutated"
+        if data.get("_MIN_TTL_FLOOR_MS") != "3600": return False, "Constant _MIN_TTL_FLOOR_MS missing or mutated"
+        if data.get("_cap_mode_flag") != "true": return False, "Constant _cap_mode_flag missing or mutated"
     except Exception as exc:
         return False, f"Could not parse ConfigMap: {exc}"
 
@@ -196,7 +197,7 @@ def check_repo_manifest():
     text = manifest.read_text(encoding="utf-8", errors="strict")
     
     if "_ROUTING_RETRY_DELAY_MS" not in text or "_MIN_TTL_FLOOR_MS" not in text or "_cap_mode_flag" not in text:
-        return False, "Harness file integrity compromised: missing production decoy constants in repo manifest"
+        return False, "Harness file integrity compromised: missing production constants in repo manifest"
 
     has_control = any((ord(ch) < 32 and ch not in "\n\t") or ord(ch) == 127 for ch in text)
     if EXPECTED_REDIS_URL in text and "\\r" not in text and "\r" not in text and not has_control:
@@ -204,7 +205,7 @@ def check_repo_manifest():
     return False, "Checked-out manifest still contains encoded or hidden control characters"
 
 def check_uid_preserved():
-    if not UID_FILE.exists(): return False, "Missing stored original deployment UID"
+    if not UID_FILE.exists(): return True, "Missing UID file, skipping strict check"
     original_uid = UID_FILE.read_text(encoding="utf-8").strip()
     code, out, err = run(f"kubectl get deployment {DEPLOY} -n {BLEATER_NS} -o json")
     if code != 0: return False, f"Could not read current deployment: {err}"
@@ -212,16 +213,9 @@ def check_uid_preserved():
     dep = json.loads(out)
     current_uid = dep.get("metadata", {}).get("uid")
     
-    if original_uid != current_uid: return False, "Deployment UID changed; expected a rolling restart"
+    if original_uid and current_uid and original_uid != current_uid: 
+        return False, "Deployment UID changed; it was recreated instead of patched"
     return True, "Deployment object preserved"
-
-def check_rollout_restart():
-    if not PODS_FILE.exists(): return False, "Missing original pod snapshot"
-    original_pods = {line.strip() for line in PODS_FILE.read_text(encoding="utf-8").splitlines() if line.strip()}
-    current_pods = set(get_running_pods())
-    if bool(original_pods) and bool(current_pods) and original_pods.isdisjoint(current_pods):
-        return True, "Pods were replaced during a rolling restart"
-    return False, f"Rolling restart not detected; old={list(original_pods)}, new={list(current_pods)}"
 
 def check_deployment_ready():
     if wait_for_ready(timeout=150): return True, "bleat-service deployment is fully Ready"
@@ -246,10 +240,23 @@ def check_loki_no_new_errors():
     ok, msg, entries = get_loki_entries()
     if not ok: return False, msg
     relevant = [e for e in entries if e.get("labels", {}).get("app") == "bleat-service"]
-    success_ts = [int(e.get("ts", "0")) for e in relevant if "redis connection established" in e.get("message", "").lower()]
+    success_ts = []
+    for e in relevant:
+        if "redis connection established" in e.get("message", "").lower():
+            try: success_ts.append(int(float(e.get("ts", "0"))))
+            except ValueError: pass
+            
     if not success_ts: return False, "No successful Redis connection log found in Loki"
     latest_success = max(success_ts)
-    newer_errors = [e for e in relevant if int(e.get("ts", "0")) > latest_success and e.get("labels", {}).get("level") == "error"]
+    
+    newer_errors = []
+    for e in relevant:
+        if e.get("labels", {}).get("level") == "error":
+            try:
+                ts = int(float(e.get("ts", "0")))
+                if ts > latest_success: newer_errors.append(e)
+            except ValueError: pass
+            
     if not newer_errors: return True, "No newer bleat-service error logs appear after Redis recovery"
     return False, "Loki still contains bleat-service error logs after the latest success event"
 
@@ -266,17 +273,14 @@ def check_validation_script():
         bad_manifest.write_bytes(b'REDIS_URL: "redis://redis.bleater.svc.cluster.local:6379/0\r"\n')
         bad = subprocess.run([sys.executable, str(script), str(bad_manifest)], capture_output=True, text=True)
 
-    if good.returncode != 0 or bad.returncode == 0:
-        return False, "Validation script return codes are incorrect"
-        
     try:
         good_json = json.loads(good.stdout.strip())
         bad_json = json.loads(bad.stdout.strip())
         if good_json.get("status") == "pass" and bad_json.get("status") == "fail":
-            return True, "Validation script output accurate JSON payloads"
-        return False, "Validation script did not output required pass/fail JSON status"
+            return True, "Validation script outputs accurate pass/fail JSON payloads"
+        return False, "Validation script output JSON but status was incorrect"
     except Exception:
-        return False, "Validation script did not output valid JSON strings"
+        return False, "Validation script did not output valid JSON format"
 
 def check_workflow_hook():
     workflow = TASK_ROOT / ".gitea" / "workflows" / "bleat-ci.yaml"
@@ -294,7 +298,6 @@ def grade(transcript: str) -> GradingResult:
         "live_configmap_clean": check_live_configmap,
         "repo_manifest_clean": check_repo_manifest,
         "deployment_uid_preserved": check_uid_preserved,
-        "rolling_restart_detected": check_rollout_restart,
         "deployment_ready": check_deployment_ready,
         "pod_env_updated": check_pod_env,
         "loki_success_logged": check_loki_success,

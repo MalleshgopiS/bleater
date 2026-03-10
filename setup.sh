@@ -22,7 +22,6 @@ done
 BLEATER_NS="bleater"
 LOG_NS="logging"
 UID_FILE="/tmp/bleat-service-deployment-uid"
-PODS_FILE="/tmp/bleat-service-original-pods"
 
 kubectl create namespace "${BLEATER_NS}" --dry-run=client -o yaml | kubectl apply -f -
 kubectl create namespace "${LOG_NS}" --dry-run=client -o yaml | kubectl apply -f -
@@ -493,26 +492,7 @@ echo "Waiting for redis and loki deployments..."
 kubectl rollout status deployment/redis -n "${BLEATER_NS}" --timeout=180s || true
 kubectl rollout status deployment/loki-gateway -n "${LOG_NS}" --timeout=180s || true
 
-echo "Waiting for bleat-service original pods to be successfully recorded..."
-for i in {1..30}; do
-    kubectl get pods -n "${BLEATER_NS}" -l app=bleat-service -o json | python3 -c '
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    for p in data.get("items", []):
-        if not p["metadata"].get("deletionTimestamp") and p["metadata"]["name"].startswith("bleat-service-"):
-            print(p["metadata"]["name"])
-except Exception:
-    pass
-' | sort > "${PODS_FILE}"
-    
-    if [ -s "${PODS_FILE}" ] && [ $(wc -l < "${PODS_FILE}") -ge 2 ]; then
-        break
-    fi
-    sleep 2
-done
-
 kubectl get deployment bleat-service -n "${BLEATER_NS}" -o jsonpath='{.metadata.uid}' > "${UID_FILE}"
-chmod 400 "${UID_FILE}" "${PODS_FILE}"
+chmod 400 "${UID_FILE}"
 
 echo "Setup complete."

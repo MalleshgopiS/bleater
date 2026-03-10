@@ -82,9 +82,10 @@ for f in sys.argv[1:]:
 
 if rc == 0:
     print(json.dumps({"status": "pass"}))
+    sys.exit(0)
 else:
     print(json.dumps({"status": "fail"}))
-sys.exit(rc)
+    sys.exit(1)
 EOF
 chmod +x scripts/validate_configmap.py
 
