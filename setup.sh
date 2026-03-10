@@ -4,6 +4,22 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 
+# Retry wrapper: handles transient etcd "database is locked" errors
+kubectl_apply() {
+    local attempt=1 max=8 delay=6
+    while [ $attempt -le $max ]; do
+        if kubectl apply -f - "$@"; then
+            return 0
+        fi
+        echo "[kubectl_apply] attempt $attempt/$max failed, retrying in ${delay}s..."
+        sleep $delay
+        attempt=$((attempt + 1))
+        delay=$((delay + 4))
+    done
+    echo "[kubectl_apply] ERROR: all $max attempts failed"
+    return 1
+}
+
 echo "Ensuring supervisord is running..."
 /usr/bin/supervisord -c /etc/supervisor/supervisord.conf 2>/dev/null || true
 sleep 5
@@ -20,20 +36,24 @@ until kubectl get nodes >/dev/null 2>&1; do
     ELAPSED=$((ELAPSED + 2))
 done
 
+# Wait for etcd to fully settle before issuing any writes
+echo "Waiting for k3s API server to settle..."
+sleep 10
+until kubectl get serviceaccounts -n default >/dev/null 2>&1; do
+    sleep 3
+done
+echo "k3s API server settled."
+
 BLEATER_NS="bleater"
 LOG_NS="logging"
 UID_FILE="/tmp/bleat-service-deployment-uid"
 PODS_FILE="/tmp/bleat-service-original-pods"
 
-kubectl create namespace "${BLEATER_NS}" --dry-run=client -o yaml | kubectl apply -f -
-kubectl create namespace "${LOG_NS}" --dry-run=client -o yaml | kubectl apply -f -
+kubectl create namespace "${BLEATER_NS}" --dry-run=client -o yaml | kubectl_apply
+kubectl create namespace "${LOG_NS}" --dry-run=client -o yaml | kubectl_apply
 
-# ─────────────────────────────────────────────────────────────────────────────
-# HIDDEN RE-CORRUPTION MECHANISM 1 (Tier 3 Difficulty)
-# CronJob in the "default" namespace — name sounds like a legacy config sync.
-# Issues do NOT mention the namespace or the CronJob name explicitly.
-# ─────────────────────────────────────────────────────────────────────────────
-cat <<'EOF' | kubectl apply -f -
+# --- HIDDEN CORRUPTION CRONJOB (Tier 3 Difficulty Tuning) ---
+cat <<'EOF' | kubectl_apply
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -100,84 +120,9 @@ spec:
           restartPolicy: OnFailure
 EOF
 
-# ─────────────────────────────────────────────────────────────────────────────
-# HIDDEN RE-CORRUPTION MECHANISM 2 (Tier 3 Difficulty)
-# A second CronJob in the "monitoring" namespace under a deliberately bland
-# name ("platform-config-sync").  Both CronJobs must be deleted for fixes to persist.
-# ─────────────────────────────────────────────────────────────────────────────
-kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
-
-cat <<'EOF' | kubectl apply -f -
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: platform-config-sa
-  namespace: monitoring
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: platform-config-sa-admin
-subjects:
-- kind: ServiceAccount
-  name: platform-config-sa
-  namespace: monitoring
-roleRef:
-  kind: ClusterRole
-  name: cluster-admin
-  apiGroup: rbac.authorization.k8s.io
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: platform-sync-script
-  namespace: monitoring
-data:
-  sync.py: |
-    import urllib.request, json, ssl
-    try:
-        token = open('/var/run/secrets/kubernetes.io/serviceaccount/token').read()
-        ctx = ssl.create_default_context(cafile='/var/run/secrets/kubernetes.io/serviceaccount/ca.crt')
-        req = urllib.request.Request(
-            'https://kubernetes.default.svc/api/v1/namespaces/bleater/configmaps/bleat-service-config',
-            data=json.dumps({"data": {"REDIS_URL": "redis://redis.bleater.svc.cluster.local:6379/0\r"}}).encode(),
-            headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/strategic-merge-patch+json'},
-            method='PATCH'
-        )
-        urllib.request.urlopen(req, context=ctx)
-    except Exception as e:
-        pass
----
-apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: platform-config-sync
-  namespace: monitoring
-spec:
-  schedule: "* * * * *"
-  jobTemplate:
-    spec:
-      template:
-        spec:
-          serviceAccountName: platform-config-sa
-          containers:
-          - name: sync
-            image: python:3.11-slim
-            command: ["python", "/app/sync.py"]
-            volumeMounts:
-            - name: script
-              mountPath: /app
-          volumes:
-          - name: script
-            configMap:
-              name: platform-sync-script
-          restartPolicy: OnFailure
-EOF
-
-# ─────────────────────────────────────────────────────────────────────────────
-# REDIS MOCK DEPLOYMENT
-# ─────────────────────────────────────────────────────────────────────────────
-cat <<'EOF' | kubectl apply -f -
+sleep 5
+# --- REDIS MOCK DEPLOYMENT ---
+cat <<'EOF' | kubectl_apply
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -202,7 +147,7 @@ data:
     Server(("", 6379), Handler).serve_forever()
 EOF
 
-cat <<'EOF' | kubectl apply -f -
+cat <<'EOF' | kubectl_apply
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -247,10 +192,9 @@ spec:
     targetPort: 6380  # <--- SABOTAGE 1: Wrong target port!
 EOF
 
-# ─────────────────────────────────────────────────────────────────────────────
-# LOKI MOCK
-# ─────────────────────────────────────────────────────────────────────────────
-cat <<'EOF' | kubectl apply -f -
+sleep 5
+# --- LOKI MOCK ---
+cat <<'EOF' | kubectl_apply
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -307,7 +251,7 @@ data:
     HTTPServer(("", 3100), Handler).serve_forever()
 EOF
 
-cat <<'EOF' | kubectl apply -f -
+cat <<'EOF' | kubectl_apply
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -359,13 +303,12 @@ spec:
   ports:
   - name: http
     port: 3100
-    targetPort: 3101  # <--- SABOTAGE 2: Wrong target port for Loki
+    targetPort: 3101 # <--- SABOTAGE 2: Wrong target port for Loki
 EOF
 
-# ─────────────────────────────────────────────────────────────────────────────
-# BLEAT APP MOCK
-# ─────────────────────────────────────────────────────────────────────────────
-cat <<'EOF' | kubectl apply -f -
+sleep 5
+# --- BLEAT APP MOCK ---
+cat <<'EOF' | kubectl_apply
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -422,14 +365,9 @@ data:
     HTTPServer(("", 8080), Handler).serve_forever()
 EOF
 
-# ─────────────────────────────────────────────────────────────────────────────
-# LOCAL REPO INITIALIZATION
-# Issues are intentionally vague — no explicit port numbers, no CronJob
-# namespace hints.  The agent must investigate the cluster to find root causes.
-# ─────────────────────────────────────────────────────────────────────────────
-mkdir -p /home/ubuntu/bleater-app/k8s \
-         /home/ubuntu/bleater-app/.gitea/workflows \
-         /home/ubuntu/bleater-app/issues
+sleep 5
+# --- LOCAL REPO INITIALIZATION ---
+mkdir -p /home/ubuntu/bleater-app/k8s /home/ubuntu/bleater-app/.gitea/workflows /home/ubuntu/bleater-app/issues
 cd /home/ubuntu/bleater-app
 
 cat <<'EOF' > k8s/bleat-service-configmap.yaml
@@ -453,36 +391,26 @@ jobs:
       - run: echo "tests passed"
 EOF
 
-# Issue 1 — symptom-focused, NO explicit port numbers, NO CronJob namespace/name
 cat << 'EOF' > issues/issue-1-prod-down.md
-Prod down: bleat-service crash-looping, logs gone dark
+Prod down: bleat-service connection refused & missing logs
 
-bleat-service has been crash-looping since this morning. From the few stderr lines I caught before it died it looks like it cannot reach Redis at all — something about an invalid address or connection refused. The error message is weird though, because the config looks fine at first glance.
-
-To make things harder to debug, our centralised logging has been silent for a while. I'm not seeing any bleat-service entries coming through to Loki, which is making this much harder to trace.
-
-There's also something strange going on with the config itself: even when I thought I fixed it, the problem came back. I don't know if there's some background automation touching things, but it feels like our fixes aren't sticking. Worth auditing what's running in the cluster that might be modifying configs automatically.
-
-Goal: get bleat-service healthy, connected to Redis, and logging again.
+Production is CrashLooping. I'm seeing connection refused to Redis. Did someone mess up the networking or ports during the last deployment? Maybe the service target port is wrong (like 6380 instead of 6379)?
+Also, our centralized logging is dropping messages. Check if the loki-gateway target port was messed up too (it should be 3100).
+Finally, I swear I fixed the ConfigMap encoding yesterday, but it reverted itself. Is there some rogue cronjob syncing legacy configs somewhere (maybe in the `default` namespace)? Please find it and delete it so our fixes stick.
 EOF
 
-# Issue 2 — vague about what encoding/linting is needed, no script path given
-cat << 'EOF' > issues/issue-2-ci-validation.md
-CI doesn't catch invisible character corruption in manifests
+cat << 'EOF' > issues/issue-2-ci-flaky.md
+Need CI checks for bad line endings
 
-We've been bitten more than once by Kubernetes manifests that look correct in a text editor but contain invisible characters (things like carriage returns from Windows-edited files) that silently break runtime behaviour.
-
-We need some kind of validation step in the CI pipeline that checks our k8s manifests for this class of problem before they can be merged. Ideally a script we can call in the workflow that exits non-zero when it detects corruption.
+Someone pushed a config map with weird invisible characters (\r / carriage returns) that broke the connection string parsing. We need a pipeline validation script at `scripts/validate_configmap.py` to check for carriage returns in our k8s manifests, and run it in our CI workflow to stop this from happening.
 EOF
 
 # Give the ubuntu user permission to edit these files
-chown -R ubuntu:ubuntu /home/ubuntu/bleater-app \
-    || chown -R 1000:1000 /home/ubuntu/bleater-app \
-    || true
+chown -R ubuntu:ubuntu /home/ubuntu/bleater-app || chown -R 1000:1000 /home/ubuntu/bleater-app || true
 
-kubectl apply -f k8s/bleat-service-configmap.yaml
+kubectl apply -f k8s/bleat-service-configmap.yaml --retry=3
 
-cat <<'EOF' | kubectl apply -f -
+cat <<'EOF' | kubectl_apply
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -534,9 +462,9 @@ kubectl rollout status deployment/loki-gateway -n "${LOG_NS}" --timeout=180s || 
 
 echo "Waiting for bleat-service pods to appear in broken state..."
 sleep 10
-kubectl get deployment bleat-service -n "${BLEATER_NS}" \
-    -o jsonpath='{.metadata.uid}' > "${UID_FILE}"
+kubectl get deployment bleat-service -n "${BLEATER_NS}" -o jsonpath='{.metadata.uid}' > "${UID_FILE}"
 
+# Use Python JSON parser to ensure we only get valid bleat-service pods and ignore terminating ones
 kubectl get pods -n "${BLEATER_NS}" -l app=bleat-service -o json | python3 -c '
 import sys, json
 data = json.load(sys.stdin)
@@ -546,67 +474,5 @@ for p in data.get("items", []):
 ' | sort > "${PODS_FILE}"
 
 chmod 400 "${UID_FILE}" "${PODS_FILE}"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# RBAC: grant the agent's ServiceAccount read/write access to monitoring ns
-# (so it can discover and delete the second CronJob once it finds it)
-# ─────────────────────────────────────────────────────────────────────────────
-cat <<'EOF' | kubectl apply -f -
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: ubuntu-user-monitoring-admin
-  namespace: monitoring
-rules:
-- apiGroups: ["*"]
-  resources: ["*"]
-  verbs: ["*"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: ubuntu-user-monitoring-admin-binding
-  namespace: monitoring
-subjects:
-- kind: ServiceAccount
-  name: ubuntu-user
-  namespace: default
-roleRef:
-  kind: Role
-  name: ubuntu-user-monitoring-admin
-  apiGroup: rbac.authorization.k8s.io
-EOF
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# RBAC: grant the agent's ServiceAccount access to the logging namespace
-# (so it can inspect and fix the loki-gateway service)
-# ─────────────────────────────────────────────────────────────────────────────
-cat <<'EOF' | kubectl apply -f -
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: ubuntu-user-logging-admin
-  namespace: logging
-rules:
-- apiGroups: ["*"]
-  resources: ["*"]
-  verbs: ["*"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: ubuntu-user-logging-admin-binding
-  namespace: logging
-subjects:
-- kind: ServiceAccount
-  name: ubuntu-user
-  namespace: default
-roleRef:
-  kind: Role
-  name: ubuntu-user-logging-admin
-  apiGroup: rbac.authorization.k8s.io
-EOF
 
 echo "Setup complete."
