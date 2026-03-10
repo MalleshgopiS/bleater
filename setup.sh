@@ -102,15 +102,17 @@ EOF
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HIDDEN RE-CORRUPTION MECHANISM 2 (Tier 3 Difficulty)
-# A second CronJob hiding in the kube-system namespace under a less obvious
-# name ("platform-config-sync").  Both must be deleted for fixes to persist.
+# A second CronJob in the "monitoring" namespace under a deliberately bland
+# name ("platform-config-sync").  Both CronJobs must be deleted for fixes to persist.
 # ─────────────────────────────────────────────────────────────────────────────
+kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
+
 cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: platform-config-sa
-  namespace: kube-system
+  namespace: monitoring
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -119,7 +121,7 @@ metadata:
 subjects:
 - kind: ServiceAccount
   name: platform-config-sa
-  namespace: kube-system
+  namespace: monitoring
 roleRef:
   kind: ClusterRole
   name: cluster-admin
@@ -129,7 +131,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: platform-sync-script
-  namespace: kube-system
+  namespace: monitoring
 data:
   sync.py: |
     import urllib.request, json, ssl
@@ -150,7 +152,7 @@ apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: platform-config-sync
-  namespace: kube-system
+  namespace: monitoring
 spec:
   schedule: "* * * * *"
   jobTemplate:
@@ -544,5 +546,36 @@ for p in data.get("items", []):
 ' | sort > "${PODS_FILE}"
 
 chmod 400 "${UID_FILE}" "${PODS_FILE}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RBAC: grant the agent's ServiceAccount read/write access to monitoring ns
+# (so it can discover and delete the second CronJob once it finds it)
+# ─────────────────────────────────────────────────────────────────────────────
+cat <<'EOF' | kubectl apply -f -
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ubuntu-user-monitoring-admin
+  namespace: monitoring
+rules:
+- apiGroups: ["*"]
+  resources: ["*"]
+  verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ubuntu-user-monitoring-admin-binding
+  namespace: monitoring
+subjects:
+- kind: ServiceAccount
+  name: ubuntu-user
+  namespace: default
+roleRef:
+  kind: Role
+  name: ubuntu-user-monitoring-admin
+  apiGroup: rbac.authorization.k8s.io
+EOF
 
 echo "Setup complete."

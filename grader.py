@@ -302,16 +302,16 @@ def check_primary_cronjob_deleted():
 
 def check_secondary_cronjob_deleted():
     """
-    A second hidden CronJob 'platform-config-sync' in the kube-system
+    A second hidden CronJob 'platform-config-sync' in the monitoring
     namespace also re-corrupts the ConfigMap.  Both must be removed.
     """
     code, out, _ = run(
-        "kubectl get cronjob platform-config-sync -n kube-system -o name 2>&1"
+        "kubectl get cronjob platform-config-sync -n monitoring -o name 2>&1"
     )
     not_found = (code != 0) or ("not found" in out.lower()) or (not out.strip())
     if not_found:
-        return True, "Secondary rogue CronJob 'platform-config-sync' (kube-system ns) has been deleted"
-    return False, "Secondary rogue CronJob 'platform-config-sync' in kube-system namespace still exists"
+        return True, "Secondary rogue CronJob 'platform-config-sync' (monitoring ns) has been deleted"
+    return False, "Secondary rogue CronJob 'platform-config-sync' in monitoring namespace still exists"
 
 def check_redis_service_port():
     """

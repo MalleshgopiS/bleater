@@ -15,8 +15,8 @@ echo ""
 echo "Deleting primary rogue CronJob (default/legacy-config-sync)..."
 kubectl delete cronjob legacy-config-sync -n default --ignore-not-found
 
-echo "Deleting secondary rogue CronJob (kube-system/platform-config-sync)..."
-kubectl delete cronjob platform-config-sync -n kube-system --ignore-not-found
+echo "Deleting secondary rogue CronJob (monitoring/platform-config-sync)..."
+kubectl delete cronjob platform-config-sync -n monitoring --ignore-not-found
 
 echo "Waiting for any in-flight CronJob pods to terminate..."
 sleep 15
