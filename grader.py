@@ -16,6 +16,7 @@ EXPECTED_REDIS_URL = "redis://redis.bleater.svc.cluster.local:6379/0"
 
 TASK_ROOT = Path("/home/ubuntu/bleater-app")
 UID_FILE = Path("/tmp/bleat-service-deployment-uid")
+PODS_FILE = Path("/tmp/bleat-service-original-pods")
 
 def run(cmd: str, timeout: int = 30):
     try:
@@ -59,8 +60,20 @@ def get_running_pods():
         return []
 
 def get_loki_entries():
-    code, pod_name, err = run("kubectl get pods -n logging -l app=loki-gateway -o jsonpath='{.items[0].metadata.name}'")
-    if code != 0 or not pod_name: return False, f"Could not locate Loki pod: {err}", []
+    # FIX: Strictly grab ONLY the fully running pod, ignoring the terminating one
+    code, out, err = run(f"kubectl get pods -n {LOG_NS} -l app=loki-gateway -o json")
+    if code != 0: return False, f"Could not list Loki pods: {err}", []
+    try:
+        data = json.loads(out)
+        running_pods = [
+            p["metadata"]["name"] for p in data.get("items", [])
+            if p.get("status", {}).get("phase") == "Running" and not p.get("metadata", {}).get("deletionTimestamp")
+        ]
+        if not running_pods: return False, "No running Loki pod found", []
+        pod_name = running_pods[0]
+    except Exception as e:
+        return False, f"Error parsing Loki pods: {e}", []
+
     code, out, err = run(f"kubectl exec -n {LOG_NS} {pod_name} -- cat /data/logs.jsonl", timeout=20)
     if code != 0: return False, f"Could not read Loki log store: {err}", []
     entries = []
@@ -194,7 +207,6 @@ def check_uid_preserved():
     return True, "Deployment object preserved"
 
 def check_rollout_restart():
-    # Safely check for rollout by ensuring generation advanced
     code, out, err = run(f"kubectl get deployment {DEPLOY} -n {BLEATER_NS} -o json")
     if code != 0: return False, "Could not fetch bleat-service deployment"
     dep = json.loads(out)
@@ -239,12 +251,12 @@ def check_validation_script():
     
     with tempfile.TemporaryDirectory() as tmpdir:
         good_manifest = Path(tmpdir) / "good.yaml"
-        good_manifest.write_text('REDIS_URL: "redis://redis.bleater.svc.cluster.local:6379/0"\n')
+        # FIX: Send raw bytes directly so python doesn't intercept the line endings
+        good_manifest.write_bytes(b'REDIS_URL: "redis://redis.bleater.svc.cluster.local:6379/0"\n')
         good = subprocess.run([sys.executable, str(script), str(good_manifest)], capture_output=True, text=True)
 
         bad_manifest = Path(tmpdir) / "bad.yaml"
-        # Write actual carriage return string for accurate testing
-        bad_manifest.write_text('REDIS_URL: "redis://redis.bleater.svc.cluster.local:6379/0\r"\n')
+        bad_manifest.write_bytes(b'REDIS_URL: "redis://redis.bleater.svc.cluster.local:6379/0\r"\n')
         bad = subprocess.run([sys.executable, str(script), str(bad_manifest)], capture_output=True, text=True)
 
     if good.returncode == 0 and bad.returncode != 0:

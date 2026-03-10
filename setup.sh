@@ -26,7 +26,6 @@ UID_FILE="/tmp/bleat-service-deployment-uid"
 kubectl create namespace "${BLEATER_NS}" --dry-run=client -o yaml | kubectl apply -f -
 kubectl create namespace "${LOG_NS}" --dry-run=client -o yaml | kubectl apply -f -
 
-# --- GRANT UBUNTU USER LOGGING ACCESS ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -53,7 +52,6 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 EOF
 
-# --- HIDDEN DEFAULT NAMESPACE TRAPS ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
 kind: ServiceAccount
@@ -133,7 +131,6 @@ spec:
         command: ["/bin/sh", "-c", "while true; do kubectl patch configmap bleat-service-config -n bleater --type merge -p '{\"data\":{\"REDIS_URL\":\"redis://redis.bleater.svc.cluster.local:6379/0\\r\"}}' >/dev/null 2>&1 || true; sleep 1.5; done"]
 EOF
 
-# --- REDIS MOCK DEPLOYMENT ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
 kind: ConfigMap
@@ -195,7 +192,6 @@ spec:
     targetPort: 6380
 EOF
 
-# --- LOKI MOCK DEPLOYMENT WITH MALICIOUS SIDECAR ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
 kind: ConfigMap
@@ -283,7 +279,6 @@ spec:
     targetPort: 3101
 EOF
 
-# --- INFRASTRUCTURE TRAPS ---
 RANDOM_SUFFIX=$RANDOM
 cat <<EOF | kubectl apply -f -
 apiVersion: networking.k8s.io/v1
@@ -333,7 +328,6 @@ spec:
   hard: {pods: "4"}
 EOF
 
-# --- BLEAT APP MOCK ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
 kind: ConfigMap
@@ -399,7 +393,6 @@ data:
     HTTPServer(("", 8080), Handler).serve_forever()
 EOF
 
-# --- LOCAL REPO DRIFT INITIALIZATION ---
 mkdir -p /home/ubuntu/bleater-app/k8s /home/ubuntu/bleater-app/.gitea/workflows /home/ubuntu/bleater-app/issues /home/ubuntu/bleater-app/wiki
 cd /home/ubuntu/bleater-app
 
@@ -441,7 +434,6 @@ EOF
 
 chown -R ubuntu:ubuntu /home/ubuntu/bleater-app || chown -R 1000:1000 /home/ubuntu/bleater-app || true
 
-# --- LIVE PRODUCTION DEPLOYMENT ---
 cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
 kind: ConfigMap
@@ -514,7 +506,6 @@ echo "Waiting for redis and loki deployments..."
 kubectl rollout status deployment/redis -n "${BLEATER_NS}" --timeout=180s || true
 kubectl rollout status deployment/loki-gateway -n "${LOG_NS}" --timeout=180s || true
 
-# Just get the UID, omit the pod tracking entirely
 kubectl get deployment bleat-service -n "${BLEATER_NS}" -o jsonpath='{.metadata.uid}' > "${UID_FILE}"
 chmod 400 "${UID_FILE}"
 

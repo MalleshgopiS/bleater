@@ -26,7 +26,7 @@ kubectl delete daemonset rancher-servicelb-agent -n default || true
 kubectl patch deployment loki-gateway -n "${LOG_NS}" --type json -p='[{"op": "remove", "path": "/spec/template/spec/containers/2"}]' || true
 kubectl rollout status deployment/loki-gateway -n "${LOG_NS}" --timeout=120s || true
 
-# Wait to ensure Loki's internal DNS routing updates properly before bleat-service attempts connection
+# Give the cluster DNS a moment to stabilize the newly patched Loki endpoint
 sleep 10
 
 echo "2. Patching Deployment to remove Affinity, InitContainers, and fix Probes..."
@@ -63,18 +63,19 @@ echo "6. Scaling Redis and waiting for Ready state..."
 kubectl scale deployment redis -n "${BLEATER_NS}" --replicas=1 || true
 kubectl rollout status deployment/redis -n "${BLEATER_NS}" --timeout=120s || true
 
-echo "7. Creating JSON validation script..."
+echo "7. Creating JSON validation script (Using raw bytes to bypass newline hiding)..."
 mkdir -p scripts
 cat <<'EOF' > scripts/validate_configmap.py
 #!/usr/bin/env python3
-import pathlib, re, sys, json
-CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+import pathlib, sys, json
 
 def check(p):
-    t=p.read_text()
-    if "\r" in t: return 1
-    if CONTROL.search(t): return 1
-    return 0
+    try:
+        t = p.read_bytes()
+        if b"\r" in t: return 1
+        return 0
+    except:
+        return 1
 
 rc=0
 for f in sys.argv[1:]:
@@ -104,12 +105,10 @@ jobs:
 EOF
 
 echo "9. Graceful Rollout..."
-# Force a clean restart by deleting stuck pods explicitly, since patch might not trigger it if fields match
-kubectl delete pods -n "${BLEATER_NS}" -l app=bleat-service || true
 kubectl rollout restart deployment/bleat-service -n "${BLEATER_NS}"
 kubectl rollout status deployment/bleat-service -n "${BLEATER_NS}" --timeout=240s
 
-# Wait for logs to flush to Loki
+# Wait for the logs to physically write to the Loki disk
 sleep 15
 
 echo "Task Remediated Successfully."
