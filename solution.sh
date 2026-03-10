@@ -26,7 +26,6 @@ kubectl delete daemonset rancher-servicelb-agent -n default || true
 kubectl patch deployment loki-gateway -n "${LOG_NS}" --type json -p='[{"op": "remove", "path": "/spec/template/spec/containers/2"}]' || true
 kubectl rollout status deployment/loki-gateway -n "${LOG_NS}" --timeout=120s || true
 
-# Give the cluster DNS a moment to stabilize the newly patched Loki endpoint
 sleep 10
 
 echo "2. Patching Deployment to remove Affinity, InitContainers, and fix Probes..."
@@ -63,7 +62,7 @@ echo "6. Scaling Redis and waiting for Ready state..."
 kubectl scale deployment redis -n "${BLEATER_NS}" --replicas=1 || true
 kubectl rollout status deployment/redis -n "${BLEATER_NS}" --timeout=120s || true
 
-echo "7. Creating JSON validation script (Using raw bytes to bypass newline hiding)..."
+echo "7. Creating JSON validation script..."
 mkdir -p scripts
 cat <<'EOF' > scripts/validate_configmap.py
 #!/usr/bin/env python3
@@ -105,10 +104,10 @@ jobs:
 EOF
 
 echo "9. Graceful Rollout..."
+kubectl delete pods -n "${BLEATER_NS}" -l app=bleat-service || true
 kubectl rollout restart deployment/bleat-service -n "${BLEATER_NS}"
 kubectl rollout status deployment/bleat-service -n "${BLEATER_NS}" --timeout=240s
 
-# Wait for the logs to physically write to the Loki disk
 sleep 15
 
 echo "Task Remediated Successfully."

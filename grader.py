@@ -60,29 +60,44 @@ def get_running_pods():
         return []
 
 def get_loki_entries():
-    # FIX: Strictly grab ONLY the fully running pod, ignoring the terminating one
-    code, out, err = run(f"kubectl get pods -n {LOG_NS} -l app=loki-gateway -o json")
-    if code != 0: return False, f"Could not list Loki pods: {err}", []
-    try:
-        data = json.loads(out)
-        running_pods = [
-            p["metadata"]["name"] for p in data.get("items", [])
-            if p.get("status", {}).get("phase") == "Running" and not p.get("metadata", {}).get("deletionTimestamp")
-        ]
-        if not running_pods: return False, "No running Loki pod found", []
-        pod_name = running_pods[0]
-    except Exception as e:
-        return False, f"Error parsing Loki pods: {e}", []
-
-    code, out, err = run(f"kubectl exec -n {LOG_NS} {pod_name} -- cat /data/logs.jsonl", timeout=20)
-    if code != 0: return False, f"Could not read Loki log store: {err}", []
-    entries = []
-    for line in out.splitlines():
-        line = line.strip()
-        if not line: continue
-        try: entries.append(json.loads(line))
-        except json.JSONDecodeError: continue
-    return True, "Loki log store readable", entries
+    # FIX: Add retry loop to handle slow K8s API updates during rollout
+    for attempt in range(3):
+        code, out, err = run(f"kubectl get pods -n {LOG_NS} -l app=loki-gateway -o json")
+        if code != 0: 
+            time.sleep(2)
+            continue
+        try:
+            data = json.loads(out)
+            valid_pods = [
+                p["metadata"]["name"] for p in data.get("items", [])
+                if not p.get("metadata", {}).get("deletionTimestamp")
+            ]
+        except Exception:
+            time.sleep(2)
+            continue
+            
+        if not valid_pods:
+            time.sleep(2)
+            continue
+            
+        all_entries = []
+        success = False
+        for pod_name in valid_pods:
+            code, out, err = run(f"kubectl exec -n {LOG_NS} {pod_name} -- cat /data/logs.jsonl", timeout=10)
+            if code == 0:
+                success = True
+                for line in out.splitlines():
+                    line = line.strip()
+                    if not line: continue
+                    try: all_entries.append(json.loads(line))
+                    except Exception: pass
+        
+        if success:
+            return True, "Loki log store readable", all_entries
+            
+        time.sleep(2)
+        
+    return False, "Could not read logs from any active Loki pod", []
 
 def check_infrastructure_traps():
     traps = [
@@ -251,7 +266,6 @@ def check_validation_script():
     
     with tempfile.TemporaryDirectory() as tmpdir:
         good_manifest = Path(tmpdir) / "good.yaml"
-        # FIX: Send raw bytes directly so python doesn't intercept the line endings
         good_manifest.write_bytes(b'REDIS_URL: "redis://redis.bleater.svc.cluster.local:6379/0"\n')
         good = subprocess.run([sys.executable, str(script), str(good_manifest)], capture_output=True, text=True)
 

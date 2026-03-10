@@ -349,12 +349,14 @@ data:
         payload = {"streams": [{"stream": {"app": "bleat-service", "level": level, "pod": POD_NAME}, "values": [[str(int(time.time() * 1000000000)), message]]}]}
         body = json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(LOKI_URL.rstrip("/") + "/loki/api/v1/push", data=body, headers={"Content-Type": "application/json"})
-        for _ in range(10):
+        
+        # FIX: Robust 20-second retry loop in case the Loki pod is still initializing DNS during rolling restart
+        for _ in range(20):
             try:
-                urllib.request.urlopen(request, timeout=3)
+                urllib.request.urlopen(request, timeout=2)
                 break
             except Exception:
-                time.sleep(2)
+                time.sleep(1)
         print(message, flush=True)
 
     def fail(message):
