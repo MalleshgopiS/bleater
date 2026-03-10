@@ -1,42 +1,39 @@
 id: bleat-service-configmap-redis-crlf-corruption
-title: "Bleat Service Production Incident — Redis Connectivity Failure"
+title: "ConfigMap Data Encoding Corruption — bleat-service Redis Config Contains Binary-Safe Keys Breaking Connection"
 category: platform-eng
-difficulty: hard
+difficulty: expert
 horizon: long
 
 tags:
   - kubernetes
   - debugging
   - redis
+  - incident-response
   - platform-engineering
-  - configmap
-  - loki
 
 prompt: |
   [Context]
-  You are responding to a production incident. The `bleat-service` application
-  in the `bleater` namespace is currently failing to start.
+  You are responding to a Sev-1 production incident. Bleater's core application (`bleat-service` in the `bleater` namespace) has entered a CrashLoopBackOff state following a recent configuration push. Service-level error rates have hit 100%, and the datastore layer is completely unreachable.
 
-  Engineers have filed incident reports in the local issue tracker at
-  `/home/ubuntu/bleater-app/issues/`. Read them before starting your
-  investigation.
+  Engineers have left preliminary triage notes and architecture requirements in the local incident tracker at `/home/ubuntu/bleater-app/issues/`.
 
-  [Task]
-  Investigate and remediate the cascading failures preventing `bleat-service`
-  from running.
+  [TASK]
+  Investigate the environment injection pipeline and internal routing to fix all cascading defects causing the connection failures.
 
-  The system is considered fully restored when:
-  1. `bleat-service` is stable, Running, and Ready (2/2 replicas).
-  2. The service successfully establishes a Redis connection, verifiable via
-     logs in the `logging` namespace (Loki).
-  3. Any root-cause automation that causes fixes to revert has been
-     permanently removed.
-  4. All preventative CI measures requested by the engineering team in the
-     issue tracker are implemented and functional.
+  Defects span:
+  - Configuration Encoding: Silent character encoding drifts (e.g., carriage returns or non-printable ASCII) must be stripped from the caching layer's connection strings without altering the canonical URI structure.
+  - Service Discovery & Routing: Ensure the internal Kubernetes service routing is correctly mapping traffic to the Redis datastore, accounting for any misconfigured target ports left by previous deployments.
+  - CI/CD Prevention Pipeline: The engineering team requires strict pre-commit hooks. You must implement the exact preventative CI validation scripts and workflow updates requested in the issue tracker to prevent future Windows-style line ending corruption.
+
+  Evaluation policy is strict. The incident is considered fully resolved ONLY when:
+  - The `bleat-service` deployment achieves a stable 2/2 Ready state.
+  - The live ConfigMap, local repository manifests, and active Pod environments all perfectly reflect the canonical, uncorrupted URL.
+  - The service successfully establishes a connection to Redis, explicitly verifiable via log entries ingested by the Loki gateway in the `logging` namespace.
+  - No new error logs appear in Loki after the recovery sequence.
+  - All CI validation measures (both the custom Python verification script and the Gitea workflow) are active and correctly reject corrupted manifests.
 
   Constraints:
-  - Do not recreate the `bleat-service` Deployment object; use rolling
-    restarts or in-place edits only.
+  - Do not recreate the `bleat-service` Deployment object (the original Kubernetes UID must be strictly preserved for audit trails). Use rolling restarts or stateless edits.
   - Do not change container image names.
   - Do not use interactive kubectl flags (-it, -i).
 

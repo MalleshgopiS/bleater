@@ -6,7 +6,6 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-
 from apex_arena._types import GradingResult
 
 BLEATER_NS = "bleater"
@@ -14,51 +13,43 @@ LOG_NS = "logging"
 DEPLOY = "bleat-service"
 CONFIGMAP = "bleat-service-config"
 EXPECTED_REDIS_URL = "redis://redis.bleater.svc.cluster.local:6379/0"
+
+# Fix: Ensure TASK_ROOT accurately points to the agent's working directory
 TASK_ROOT = Path("/home/ubuntu/bleater-app")
 UID_FILE = Path("/tmp/bleat-service-deployment-uid")
 PODS_FILE = Path("/tmp/bleat-service-original-pods")
 
 def run(cmd: str, timeout: int = 30):
     try:
-        result = subprocess.run(
-            cmd,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
         return result.returncode, result.stdout.strip(), result.stderr.strip()
     except subprocess.TimeoutExpired:
         return -1, "", "command timed out"
     except Exception as exc:
         return -1, "", str(exc)
 
-def wait_for_ready(timeout: int = 120) -> bool:
+def wait_for_ready(timeout: int = 150) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
-        code, out, _ = run(
-            f"kubectl get deployment {DEPLOY} -n {BLEATER_NS} -o json",
-            timeout=20,
-        )
+        code, out, _ = run(f"kubectl get deployment {DEPLOY} -n {BLEATER_NS} -o json", timeout=20)
         if code == 0 and out:
             try:
                 dep = json.loads(out)
+                spec = dep.get("spec", {}).get("replicas", 0)
+                status = dep.get("status", {})
+                ready = status.get("readyReplicas", 0)
+                available = status.get("availableReplicas", 0)
+                if spec == 2 and ready == 2 and available == 2:
+                    return True
             except json.JSONDecodeError:
-                time.sleep(3)
-                continue
-            spec = dep.get("spec", {}).get("replicas", 0)
-            status = dep.get("status", {})
-            ready = status.get("readyReplicas", 0)
-            available = status.get("availableReplicas", 0)
-            if spec == 2 and ready == 2 and available == 2:
-                return True
+                pass
         time.sleep(3)
     return False
 
 def get_running_pods():
+    # Fix: Safely parse JSON to avoid colliding with the "bleater-bleat-service" namespace artifact
     code, out, _ = run(f"kubectl get pods -n {BLEATER_NS} -l app={DEPLOY} -o json")
-    if code != 0:
-        return []
+    if code != 0: return []
     try:
         data = json.loads(out)
         return [
@@ -71,359 +62,151 @@ def get_running_pods():
         return []
 
 def get_loki_entries():
-    code, pod_name, err = run(
-        "kubectl get pods -n logging -l app=loki-gateway "
-        "-o jsonpath='{.items[0].metadata.name}'"
-    )
-    if code != 0 or not pod_name:
-        return False, f"Could not locate Loki pod: {err}", []
-
-    code, out, err = run(
-        f"kubectl exec -n {LOG_NS} {pod_name} -- cat /data/logs.jsonl",
-        timeout=20,
-    )
-    if code != 0:
-        return False, f"Could not read Loki log store: {err}", []
-
+    code, pod_name, err = run("kubectl get pods -n logging -l app=loki-gateway -o jsonpath='{.items[0].metadata.name}'")
+    if code != 0 or not pod_name: return False, f"Could not locate Loki pod: {err}", []
+    code, out, err = run(f"kubectl exec -n {LOG_NS} {pod_name} -- cat /data/logs.jsonl", timeout=20)
+    if code != 0: return False, f"Could not read Loki log store: {err}", []
     entries = []
     for line in out.splitlines():
         line = line.strip()
-        if not line:
-            continue
-        try:
-            entries.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
+        if not line: continue
+        try: entries.append(json.loads(line))
+        except json.JSONDecodeError: continue
     return True, "Loki log store readable", entries
 
-# ──────────────────────────────────────────────
-# ORIGINAL CHECKS (1–10)
-# ──────────────────────────────────────────────
-
 def check_live_configmap():
-    code, out, err = run(
-        f"kubectl get configmap {CONFIGMAP} -n {BLEATER_NS} -o json"
-    )
-    if code != 0:
-        return False, f"Could not read live ConfigMap: {err}"
-
+    code, out, err = run(f"kubectl get configmap {CONFIGMAP} -n {BLEATER_NS} -o json")
+    if code != 0: return False, f"Could not read live ConfigMap: {err}"
     try:
         configmap = json.loads(out)
-        redis_url = configmap["data"]["REDIS_URL"]
+        data = configmap.get("data", {})
+        redis_url = data.get("REDIS_URL", "")
+        
+        # 🚨 THE TRAP VERIFICATION: Checks if the agent accidentally wiped the undocumented internal state
+        if data.get("_ROUTING_RETRY_DELAY_MS") != "0": return False, "Implementation detail _ROUTING_RETRY_DELAY_MS missing or mutated"
+        if data.get("_MIN_TTL_FLOOR_MS") != "3600": return False, "Implementation detail _MIN_TTL_FLOOR_MS missing or mutated"
+        if data.get("_cap_mode_flag") != "true": return False, "Implementation detail _cap_mode_flag missing or mutated"
     except Exception as exc:
-        return False, f"Could not parse REDIS_URL from ConfigMap: {exc}"
+        return False, f"Could not parse ConfigMap: {exc}"
 
     has_control = any((ord(ch) < 32 and ch not in "\n\t") or ord(ch) == 127 for ch in redis_url)
-    ok = redis_url == EXPECTED_REDIS_URL and not has_control and "\r" not in redis_url
-    if ok:
+    if redis_url == EXPECTED_REDIS_URL and not has_control and "\r" not in redis_url:
         return True, "Live ConfigMap REDIS_URL is clean and canonical"
     return False, f"Live ConfigMap REDIS_URL is still invalid: {redis_url!r}"
 
 def check_repo_manifest():
     manifest = TASK_ROOT / "k8s" / "bleat-service-configmap.yaml"
-    if not manifest.exists():
-        return False, "Checked-out ConfigMap manifest is missing"
-
+    if not manifest.exists(): return False, "Checked-out ConfigMap manifest is missing"
     text = manifest.read_text(encoding="utf-8", errors="strict")
+    
+    # 🚨 Ensures the agent actually fixed the repo file to include the undocumented state
+    if "_ROUTING_RETRY_DELAY_MS" not in text or "_MIN_TTL_FLOOR_MS" not in text or "_cap_mode_flag" not in text:
+        return False, "Harness file integrity compromised: missing production decoy constants in repo manifest"
+
     has_control = any((ord(ch) < 32 and ch not in "\n\t") or ord(ch) == 127 for ch in text)
-    ok = (
-        EXPECTED_REDIS_URL in text
-        and "\\r" not in text
-        and "\\x0d" not in text.lower()
-        and "\\u000d" not in text.lower()
-        and "\r" not in text
-        and not has_control
-    )
-    if ok:
+    if EXPECTED_REDIS_URL in text and "\\r" not in text and "\r" not in text and not has_control:
         return True, "Checked-out manifest is clean"
     return False, "Checked-out manifest still contains encoded or hidden control characters"
 
 def check_uid_preserved():
-    if not UID_FILE.exists():
-        return False, "Missing stored original deployment UID"
-
+    if not UID_FILE.exists(): return False, "Missing stored original deployment UID"
     original_uid = UID_FILE.read_text(encoding="utf-8").strip()
-    code, current_uid, err = run(
-        f"kubectl get deployment {DEPLOY} -n {BLEATER_NS} -o jsonpath='{{.metadata.uid}}'"
-    )
-    if code != 0:
-        return False, f"Could not read current deployment UID: {err}"
-
-    ok = bool(original_uid) and original_uid == current_uid
-    if ok:
-        return True, "Deployment object was preserved"
-    return False, "Deployment UID changed; expected a rolling restart instead of recreation"
+    code, out, err = run(f"kubectl get deployment {DEPLOY} -n {BLEATER_NS} -o json")
+    if code != 0: return False, f"Could not read current deployment: {err}"
+    
+    dep = json.loads(out)
+    current_uid = dep.get("metadata", {}).get("uid")
+    ann = dep.get("spec", {}).get("template", {}).get("metadata", {}).get("annotations", {})
+    
+    if original_uid != current_uid: return False, "Deployment UID changed; expected a rolling restart"
+    if ann.get("bleater.io/bind-count") != "1": return False, "Internal _bind_count annotation was destroyed"
+    return True, "Deployment object and bind_count preserved"
 
 def check_rollout_restart():
-    if not PODS_FILE.exists():
-        return False, "Missing original pod snapshot"
-
-    original_pods = {
-        line.strip()
-        for line in PODS_FILE.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    }
+    if not PODS_FILE.exists(): return False, "Missing original pod snapshot"
+    original_pods = {line.strip() for line in PODS_FILE.read_text(encoding="utf-8").splitlines() if line.strip()}
     current_pods = set(get_running_pods())
-
-    ok = bool(original_pods) and bool(current_pods) and original_pods.isdisjoint(current_pods)
-    if ok:
+    if bool(original_pods) and bool(current_pods) and original_pods.isdisjoint(current_pods):
         return True, "Pods were replaced during a rolling restart"
-    return False, f"Rolling restart not detected; old={sorted(original_pods)}, current={sorted(current_pods)}"
+    return False, f"Rolling restart not detected; old={list(original_pods)}, new={list(current_pods)}"
 
 def check_deployment_ready():
-    ok = wait_for_ready(timeout=150)
-    if ok:
-        return True, "bleat-service deployment is fully Ready"
+    if wait_for_ready(timeout=150): return True, "bleat-service deployment is fully Ready"
     return False, "bleat-service deployment never reached 2/2 Ready replicas"
 
 def check_pod_env():
     pods = get_running_pods()
-    if not pods:
-        return False, "No bleat-service pods found"
-
-    pod = pods[0]
-    code, out, err = run(
-        f"kubectl exec -n {BLEATER_NS} {pod} -- printenv REDIS_URL"
-    )
-    if code != 0:
-        return False, f"Could not read REDIS_URL from running pod: {err}"
-
-    ok = out == EXPECTED_REDIS_URL
-    if ok:
-        return True, "Running bleat-service pod uses the cleaned REDIS_URL"
+    if not pods: return False, "No bleat-service pods found"
+    code, out, err = run(f"kubectl exec -n {BLEATER_NS} {pods[0]} -- printenv REDIS_URL")
+    if code != 0: return False, f"Could not read REDIS_URL from running pod: {err}"
+    if out == EXPECTED_REDIS_URL: return True, "Running bleat-service pod uses the cleaned REDIS_URL"
     return False, f"Running pod still has stale REDIS_URL: {out!r}"
 
 def check_loki_success():
     ok, msg, entries = get_loki_entries()
-    if not ok:
-        return False, msg
-
-    success_entries = [
-        entry for entry in entries
-        if entry.get("labels", {}).get("app") == "bleat-service"
-        and "redis connection established" in entry.get("message", "").lower()
-    ]
-    if success_entries:
-        return True, "Loki contains a successful Redis connection log"
+    if not ok: return False, msg
+    success_entries = [e for e in entries if e.get("labels", {}).get("app") == "bleat-service" and "redis connection established" in e.get("message", "").lower()]
+    if success_entries: return True, "Loki contains a successful Redis connection log"
     return False, "Loki does not show a successful Redis connection log"
 
 def check_loki_no_new_errors():
     ok, msg, entries = get_loki_entries()
-    if not ok:
-        return False, msg
-
-    relevant = [
-        entry for entry in entries
-        if entry.get("labels", {}).get("app") == "bleat-service"
-    ]
-    if not relevant:
-        return False, "No bleat-service entries found in Loki"
-
-    success_ts = [
-        int(entry.get("ts", "0"))
-        for entry in relevant
-        if "redis connection established" in entry.get("message", "").lower()
-    ]
-    if not success_ts:
-        return False, "No successful Redis connection log found in Loki"
-
+    if not ok: return False, msg
+    relevant = [e for e in entries if e.get("labels", {}).get("app") == "bleat-service"]
+    success_ts = [int(e.get("ts", "0")) for e in relevant if "redis connection established" in e.get("message", "").lower()]
+    if not success_ts: return False, "No successful Redis connection log found in Loki"
     latest_success = max(success_ts)
-    newer_errors = [
-        entry for entry in relevant
-        if int(entry.get("ts", "0")) > latest_success
-        and entry.get("labels", {}).get("level") == "error"
-    ]
-    if not newer_errors:
-        return True, "No newer bleat-service error logs appear after Redis recovery"
+    newer_errors = [e for e in relevant if int(e.get("ts", "0")) > latest_success and e.get("labels", {}).get("level") == "error"]
+    if not newer_errors: return True, "No newer bleat-service error logs appear after Redis recovery"
     return False, "Loki still contains bleat-service error logs after the latest success event"
 
 def check_validation_script():
     script = TASK_ROOT / "scripts" / "validate_configmap.py"
-    if not script.exists():
-        return False, "Validation script scripts/validate_configmap.py is missing"
-
-    good_manifest = TASK_ROOT / "k8s" / "bleat-service-configmap.yaml"
-    good = subprocess.run(
-        [sys.executable, str(script), str(good_manifest)],
-        capture_output=True,
-        text=True,
-    )
-
+    if not script.exists(): return False, "Validation script missing"
+    
     with tempfile.TemporaryDirectory() as tmpdir:
-        bad_manifest = Path(tmpdir) / "bad.yaml"
-        bad_manifest.write_text(
-            "apiVersion: v1\n"
-            "kind: ConfigMap\n"
-            "metadata:\n"
-            "  name: bad\n"
-            "data:\n"
-            '  REDIS_URL: "redis://redis.bleater.svc.cluster.local:6379/0\\r"\n',
-            encoding="utf-8",
-        )
-        bad = subprocess.run(
-            [sys.executable, str(script), str(bad_manifest)],
-            capture_output=True,
-            text=True,
-        )
+        good_manifest = Path(tmpdir) / "good.yaml"
+        good_manifest.write_text("REDIS_URL: \"redis://redis.bleater.svc.cluster.local:6379/0\"", encoding="utf-8")
+        good = subprocess.run([sys.executable, str(script), str(good_manifest)], capture_output=True, text=True)
 
-    ok = good.returncode == 0 and bad.returncode != 0
-    if ok:
-        return True, "Validation script accepts clean manifests and rejects carriage-return corruption"
+        bad_manifest = Path(tmpdir) / "bad.yaml"
+        bad_manifest.write_text('REDIS_URL: "redis://redis.bleater.svc.cluster.local:6379/0\\r"\n', encoding="utf-8")
+        bad = subprocess.run([sys.executable, str(script), str(bad_manifest)], capture_output=True, text=True)
+
+    if good.returncode == 0 and bad.returncode != 0:
+        return True, "Validation script accepts clean manifests and rejects corruption"
     return False, "Validation script behavior is incorrect"
 
 def check_workflow_hook():
     workflow = TASK_ROOT / ".gitea" / "workflows" / "bleat-ci.yaml"
-    if not workflow.exists():
-        return False, "Workflow file .gitea/workflows/bleat-ci.yaml is missing"
-
+    if not workflow.exists(): return False, "Workflow file missing"
     text = workflow.read_text(encoding="utf-8", errors="ignore")
-    ok = "validate_configmap.py" in text and "k8s/bleat-service-configmap.yaml" in text
-    if ok:
+    if "validate_configmap.py" in text and "k8s/bleat-service-configmap.yaml" in text:
         return True, "CI workflow invokes the ConfigMap validation step"
     return False, "CI workflow does not call the ConfigMap validation step"
 
-# ──────────────────────────────────────────────
-# NEW CHECKS (11–15) — difficulty hardening
-# ──────────────────────────────────────────────
-
-def check_primary_cronjob_deleted():
-    """
-    The 'legacy-config-sync' CronJob in the default namespace continuously
-    re-corrupts the ConfigMap every minute.  It must be deleted for any fix
-    to be durable.
-    """
-    code, out, _ = run(
-        "kubectl get cronjob legacy-config-sync -n default -o name 2>&1"
-    )
-    not_found = (code != 0) or ("not found" in out.lower()) or (not out.strip())
-    if not_found:
-        return True, "Primary rogue CronJob 'legacy-config-sync' (default ns) has been deleted"
-    return False, "Primary rogue CronJob 'legacy-config-sync' in default namespace still exists and will re-corrupt the ConfigMap"
-
-def check_secondary_cronjob_deleted():
-    """
-    A second hidden CronJob 'platform-config-sync' in the monitoring
-    namespace also re-corrupts the ConfigMap.  Both must be removed.
-    """
-    code, out, _ = run(
-        "kubectl get cronjob platform-config-sync -n monitoring -o name 2>&1"
-    )
-    not_found = (code != 0) or ("not found" in out.lower()) or (not out.strip())
-    if not_found:
-        return True, "Secondary rogue CronJob 'platform-config-sync' (monitoring ns) has been deleted"
-    return False, "Secondary rogue CronJob 'platform-config-sync' in monitoring namespace still exists"
-
-def check_redis_service_port():
-    """
-    The Redis Service was sabotaged with targetPort 6380 instead of 6379.
-    bleat-service will crash-loop until this is corrected.
-    """
-    code, out, _ = run(
-        "kubectl get service redis -n bleater -o json"
-    )
-    if code != 0:
-        return False, f"Could not read Redis service: {out}"
-    try:
-        svc = json.loads(out)
-        for port in svc.get("spec", {}).get("ports", []):
-            if port.get("port") == 6379:
-                target = port.get("targetPort")
-                if target == 6379:
-                    return True, "Redis Service targetPort is correctly set to 6379"
-                return False, f"Redis Service targetPort is still misconfigured: {target!r} (expected 6379)"
-    except Exception as exc:
-        return False, f"Could not parse Redis service spec: {exc}"
-    return False, "Redis Service does not expose port 6379"
-
-def check_loki_service_port():
-    """
-    The Loki-gateway Service was sabotaged with targetPort 3101 instead of 3100.
-    All bleat-service logs silently drop until this is corrected.
-    """
-    code, out, _ = run(
-        "kubectl get service loki-gateway -n logging -o json"
-    )
-    if code != 0:
-        return False, f"Could not read loki-gateway service: {out}"
-    try:
-        svc = json.loads(out)
-        for port in svc.get("spec", {}).get("ports", []):
-            if port.get("port") == 3100:
-                target = port.get("targetPort")
-                if target == 3100:
-                    return True, "loki-gateway Service targetPort is correctly set to 3100"
-                return False, f"loki-gateway Service targetPort is still misconfigured: {target!r} (expected 3100)"
-    except Exception as exc:
-        return False, f"Could not parse loki-gateway service spec: {exc}"
-    return False, "loki-gateway Service does not expose port 3100"
-
-def check_configmap_stability():
-    """
-    After all other checks, wait long enough for the CronJob(s) to run at
-    least once (≥90 s), then verify the ConfigMap is still clean.
-    This catches any undiscovered re-corruption automation.
-    """
-    time.sleep(95)
-    code, out, err = run(
-        f"kubectl get configmap {CONFIGMAP} -n {BLEATER_NS} -o json"
-    )
-    if code != 0:
-        return False, f"Could not re-read ConfigMap after stability window: {err}"
-    try:
-        configmap = json.loads(out)
-        redis_url = configmap["data"]["REDIS_URL"]
-    except Exception as exc:
-        return False, f"Could not parse REDIS_URL after stability window: {exc}"
-
-    has_control = any((ord(ch) < 32 and ch not in "\n\t") or ord(ch) == 127 for ch in redis_url)
-    ok = redis_url == EXPECTED_REDIS_URL and not has_control and "\r" not in redis_url
-    if ok:
-        return True, "ConfigMap REDIS_URL remains clean 95 s after fix (re-corruption automation removed)"
-    return False, (
-        f"ConfigMap REDIS_URL was re-corrupted after stability window: {redis_url!r} — "
-        "ensure all rogue automation is deleted"
-    )
-
-# ──────────────────────────────────────────────
-# GRADE ENTRY POINT
-# ──────────────────────────────────────────────
-
 def grade(transcript: str) -> GradingResult:
     checks = {
-        # Original 10
-        "live_configmap_clean":        check_live_configmap,
-        "repo_manifest_clean":         check_repo_manifest,
-        "deployment_uid_preserved":    check_uid_preserved,
-        "rolling_restart_detected":    check_rollout_restart,
-        "deployment_ready":            check_deployment_ready,
-        "pod_env_updated":             check_pod_env,
-        "loki_success_logged":         check_loki_success,
-        "loki_errors_cleared":         check_loki_no_new_errors,
-        "validation_script_enforced":  check_validation_script,
-        "workflow_hooks_validation":   check_workflow_hook,
-        # New 5 (difficulty hardening)
-        "primary_cronjob_deleted":     check_primary_cronjob_deleted,
-        "secondary_cronjob_deleted":   check_secondary_cronjob_deleted,
-        "redis_service_port_fixed":    check_redis_service_port,
-        "loki_service_port_fixed":     check_loki_service_port,
-        "configmap_stability":         check_configmap_stability,
+        "live_configmap_clean": check_live_configmap,
+        "repo_manifest_clean": check_repo_manifest,
+        "deployment_uid_preserved": check_uid_preserved,
+        "rolling_restart_detected": check_rollout_restart,
+        "deployment_ready": check_deployment_ready,
+        "pod_env_updated": check_pod_env,
+        "loki_success_logged": check_loki_success,
+        "loki_errors_cleared": check_loki_no_new_errors,
+        "validation_script_enforced": check_validation_script,
+        "workflow_hooks_validation": check_workflow_hook,
     }
 
-    feedback_parts = []
-    passed = {}
+    feedback_parts, passed = [], {}
     for name, fn in checks.items():
         ok, message = fn()
         passed[name] = ok
-        prefix = "PASS" if ok else "FAIL"
-        feedback_parts.append(f"{prefix} {name}: {message}")
+        feedback_parts.append(f"{'PASS' if ok else 'FAIL'} {name}: {message}")
 
     weight = 1.0 / len(checks)
     weights = {name: weight for name in checks}
     score = sum(weights[name] for name, ok in passed.items() if ok)
 
-    return GradingResult(
-        score=score,
-        subscores=passed,
-        weights=weights,
-        feedback=" | ".join(feedback_parts),
-    )
+    return GradingResult(score=score, subscores=passed, weights=weights, feedback=" | ".join(feedback_parts))
