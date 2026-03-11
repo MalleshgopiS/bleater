@@ -1010,6 +1010,17 @@ Could be a lot of things. Might be worth checking the config, dependencies,
 and anything else that looks off. We're not sure if it's one problem or
 several.
 
+## Additional Context
+One engineer mentioned they tried patching the config manually earlier today
+but it seemed to revert on its own shortly after. Not sure if that was a
+fluke or something is actively resetting it — probably worth investigating
+whether there's something in the cluster undoing fixes.
+
+Also, someone raised that whatever caused this could happen again. Once
+things are stable, we should make sure the k8s manifests in the repo are
+correct and that CI has some way to catch this kind of configuration
+corruption before it ever reaches the cluster.
+
 ## Constraints
 - **DO NOT recreate** the `bleat-service` Deployment (UID must be preserved for audit).
 - Use rolling restarts only.

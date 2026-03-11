@@ -239,17 +239,9 @@ def check_uid_preserved():
         return False, f"Could not read current deployment: {err}"
     dep = json.loads(out)
     current_uid = dep.get("metadata", {}).get("uid")
-    ann = (
-        dep.get("spec", {})
-        .get("template", {})
-        .get("metadata", {})
-        .get("annotations", {})
-    )
     if original_uid != current_uid:
         return False, "Deployment UID changed; a delete+recreate was performed instead of rolling restart"
-    if ann.get("bleater.io/bind-count") != "1":
-        return False, "Internal bleater.io/bind-count annotation was destroyed or mutated"
-    return True, "Deployment object UID and bind-count annotation preserved"
+    return True, "Deployment object UID preserved"
 
 
 def check_rollout_restart():

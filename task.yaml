@@ -28,6 +28,11 @@ prompt: |
   The incident is considered resolved when `bleat-service` is healthy,
   connected to its dependencies, and operating without errors end-to-end.
 
+  Once the service is restored, also harden the system to prevent silent
+  reintroduction of the same corruption — this includes fixing the
+  source-of-truth manifests in the repository and adding CI safeguards so
+  the same class of corruption is caught before it can reach the cluster again.
+
   Constraints:
   - Do **not** recreate the `bleat-service` Deployment (the original Kubernetes
     UID must be preserved for audit trails). Use rolling restarts only.
