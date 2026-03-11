@@ -109,7 +109,10 @@ ESCAPE_RE   = re.compile(r"(\\r|\\x0d|\\u000d)", re.IGNORECASE)
 def check_file(path: pathlib.Path) -> list[str]:
     errors: list[str] = []
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        # Read raw bytes then decode — avoids Python's universal-newline
+        # translation which silently converts \r → \n, hiding corruption.
+        raw = path.read_bytes()
+        text = raw.decode("utf-8", errors="replace")
     except Exception as exc:
         return [f"Cannot read file: {exc}"]
     if "\r" in text:
