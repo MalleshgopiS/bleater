@@ -21,13 +21,51 @@ LOG_NS="logging"
 UID_FILE="/tmp/bleat-service-deployment-uid"
 PODS_FILE="/tmp/bleat-service-original-pods"
 
-kubectl create namespace "${BLEATER_NS}" --dry-run=client -o yaml | kubectl apply -f -
-kubectl create namespace "${LOG_NS}"     --dry-run=client -o yaml | kubectl apply -f -
+# ── Retry helper: retries kubectl apply up to 5 times on transient failures ─
+kapply() {
+    local attempt=0
+    until kubectl apply "$@"; do
+        attempt=$((attempt + 1))
+        [ "${attempt}" -ge 5 ] && { echo "kubectl apply failed after 5 attempts"; return 1; }
+        echo "Retrying kubectl apply (attempt ${attempt})..."
+        sleep $((attempt * 3))
+    done
+}
 
+kapply_stdin() {
+    # Usage: some_command | kapply_stdin
+    local attempt=0
+    local input
+    input="$(cat)"
+    until printf '%s' "${input}" | kubectl apply -f -; do
+        attempt=$((attempt + 1))
+        [ "${attempt}" -ge 5 ] && { echo "kubectl apply -f - failed after 5 attempts"; return 1; }
+        echo "Retrying kubectl apply -f - (attempt ${attempt})..."
+        sleep $((attempt * 3))
+    done
+}
+
+# Wait for the API server to fully accept writes before creating anything.
+echo "Waiting for k3s API write-readiness..."
+for i in $(seq 1 30); do
+    if kubectl get nodes -o name >/dev/null 2>&1 && \
+       kubectl auth can-i create namespace --all-namespaces >/dev/null 2>&1; then
+        echo "API server ready."
+        break
+    fi
+    sleep 3
+done
+sleep 5
+
+kubectl create namespace "${BLEATER_NS}" --dry-run=client -o yaml | kapply_stdin
+kubectl create namespace "${LOG_NS}"     --dry-run=client -o yaml | kapply_stdin
+
+sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
 # RBAC — let the ubuntu service account manage the logging namespace.
+sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
-cat <<'EOF' | kubectl apply -f -
+cat <<'EOF' | kapply_stdin
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -53,14 +91,16 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 EOF
 
+sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
 # HIDDEN RE-CORRUPTION ENGINE
 # Lives in kube-system under a plausible-sounding infrastructure name.
 # Runs every minute; re-injects the CRLF corruption AND strips the six
 # production constants — ensuring the ConfigMap reverts unless the CronJob
 # is explicitly removed.
+sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
-cat <<'EOF' | kubectl apply -f -
+cat <<'EOF' | kapply_stdin
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -143,11 +183,13 @@ spec:
               name: rq-sync-payload
 EOF
 
+sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
 # REDIS MOCK — custom Python TCP server (no auth bypass possible)
 # BUG 1: Service targetPort is 6380 but container listens on 6379.
+sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
-cat <<'EOF' | kubectl apply -f -
+cat <<'EOF' | kapply_stdin
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -236,13 +278,15 @@ spec:
     targetPort: 6380   # ← BUG 1: wrong targetPort, Redis listens on 6379
 EOF
 
+sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
 # BUG 2: NetworkPolicy blocks traffic to Redis unless pod carries label
 #         access=redis.  bleat-service pods do NOT have this label initially.
 # BUG 3: NetworkPolicy also blocks Loki egress unless pod carries label
 #         observability=enabled.
+sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
-cat <<'EOF' | kubectl apply -f -
+cat <<'EOF' | kapply_stdin
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -264,11 +308,13 @@ spec:
       port: 6379
 EOF
 
+sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
 # LOKI MOCK — stores push entries in /data/logs.jsonl
 # BUG 4: Service targetPort is 3101 but container listens on 3100.
+sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
-cat <<'EOF' | kubectl apply -f -
+cat <<'EOF' | kapply_stdin
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -359,21 +405,25 @@ spec:
     targetPort: 3101   # ← BUG 4: wrong targetPort, Loki listens on 3100
 EOF
 
+sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
 # BUG 5: Redis auth secret carries the old, rotated password.
 #         The correct credential is in /home/ubuntu/bleater-app/wiki/credentials.md
+sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
 kubectl create secret generic bleat-service-auth \
   -n "${BLEATER_NS}" \
   --from-literal=REDIS_PASSWORD=old-pre-rotation-password-do-not-use \
-  --dry-run=client -o yaml | kubectl apply -f -
+  --dry-run=client -o yaml | kapply_stdin
 
+sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
 # BLEAT-SERVICE APPLICATION SCRIPT
 # The app verifies ALL SIX production constants are present via env vars.
 # Removing any constant from the ConfigMap → pod crashes → deployment never Ready.
+sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
-cat <<'EOF' | kubectl apply -f -
+cat <<'EOF' | kapply_stdin
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -473,42 +523,55 @@ data:
     HTTPServer(("", 8080), H).serve_forever()
 EOF
 
+sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
 # LIVE CONFIGMAP — contains the corruption AND all six production constants.
 # The rogue CronJob will strip the constants and keep the CRLF unless removed.
+sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
-python3 - <<'PYEOF'
-import json, subprocess
+sleep 2
 
+sleep 2
+# ═══════════════════════════════════════════════════════════════════════════════
+# LIVE CONFIGMAP — contains the corruption AND all six production constants.
+# The rogue CronJob will strip the constants and keep the CRLF unless removed.
+# Uses printf to embed a real CR byte (\r) inside the JSON value.
+sleep 2
+# ═══════════════════════════════════════════════════════════════════════════════
+CM_JSON=$(python3 -c "
+import json, sys
 cm = {
-    "apiVersion": "v1",
-    "kind": "ConfigMap",
-    "metadata": {"name": "bleat-service-config", "namespace": "bleater"},
-    "data": {
-        "REDIS_URL":                "redis://redis.bleater.svc.cluster.local:6379/0\r",
-        "LOG_LEVEL":                "info",
-        "_ROUTING_RETRY_DELAY_MS":  "0",
-        "_MIN_TTL_FLOOR_MS":        "3600",
-        "_cap_mode_flag":           "true",
-        "_EVENT_TTL_GRACE_MS":      "500",
-        "_PIPELINE_SCHEMA_VERSION": "3",
-        "_FANOUT_CAP_ENABLED":      "false",
+    'apiVersion': 'v1',
+    'kind': 'ConfigMap',
+    'metadata': {'name': 'bleat-service-config', 'namespace': 'bleater'},
+    'data': {
+        'REDIS_URL':                'redis://redis.bleater.svc.cluster.local:6379/0\r',
+        'LOG_LEVEL':                'info',
+        '_ROUTING_RETRY_DELAY_MS':  '0',
+        '_MIN_TTL_FLOOR_MS':        '3600',
+        '_cap_mode_flag':           'true',
+        '_EVENT_TTL_GRACE_MS':      '500',
+        '_PIPELINE_SCHEMA_VERSION': '3',
+        '_FANOUT_CAP_ENABLED':      'false',
     },
 }
-r = subprocess.run(
-    ["kubectl", "apply", "-f", "-"],
-    input=json.dumps(cm),
-    capture_output=True, text=True,
-)
-print(r.stdout or r.stderr)
-PYEOF
+sys.stdout.write(json.dumps(cm))
+")
+attempt=0
+until echo "${CM_JSON}" | kubectl apply -f -; do
+    attempt=$((attempt + 1))
+    [ "${attempt}" -ge 5 ] && { echo "ConfigMap apply failed"; exit 1; }
+    sleep $((attempt * 3))
+done
 
+sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
 # BLEAT-SERVICE DEPLOYMENT
 # Note: bleat-service pods do NOT carry the labels needed by the NetworkPolicy
 #       (access=redis).  The agent must add them.
+sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
-cat <<'EOF' | kubectl apply -f -
+cat <<'EOF' | kapply_stdin
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -609,11 +672,13 @@ spec:
           defaultMode: 0555
 EOF
 
+sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
 # LOCAL REPOSITORY — initialise with bugs matching the live cluster.
 # KEY TRAP: repo manifest contains ONLY the base keys; all six production
 #           constants are absent.  The agent must discover them from the live
 #           ConfigMap and add them back, otherwise both grader manifest checks fail.
+sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
 APP_DIR="/home/ubuntu/bleater-app"
 mkdir -p "${APP_DIR}"/{k8s,scripts,.gitea/workflows,issues,wiki}
@@ -677,8 +742,10 @@ MDEOF
 chown -R ubuntu:ubuntu "${APP_DIR}" 2>/dev/null \
   || chown -R 1000:1000 "${APP_DIR}" 2>/dev/null || true
 
+sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
 # Wait for all supporting pods, then capture baseline state for grader.
+sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
 echo "Waiting for Redis pod..."
 kubectl rollout status deployment/redis       -n "${BLEATER_NS}" --timeout=180s || true
