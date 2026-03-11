@@ -89,6 +89,36 @@ roleRef:
   kind: Role
   name: ubuntu-user-logging-admin
   apiGroup: rbac.authorization.k8s.io
+---
+# Allow ubuntu to discover and delete the rogue CronJob in kube-system.
+# The agent must still find it by auditing all namespaces; this only grants
+# the mechanical ability to remove it once discovered.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: kube-system
+  name: ubuntu-user-kube-system-cronjob-admin
+rules:
+- apiGroups: ["batch"]
+  resources: ["cronjobs", "jobs"]
+  verbs: ["get", "list", "delete", "deletecollection"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ubuntu-user-kube-system-cronjob-admin-binding
+  namespace: kube-system
+subjects:
+- kind: ServiceAccount
+  name: ubuntu-user
+  namespace: default
+roleRef:
+  kind: Role
+  name: ubuntu-user-kube-system-cronjob-admin
+  apiGroup: rbac.authorization.k8s.io
 EOF
 
 sleep 2

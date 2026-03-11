@@ -4,6 +4,7 @@ set -euo pipefail
 
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 BLEATER_NS="bleater"
+LOG_NS="logging"
 APP_DIR="/home/ubuntu/bleater-app"
 
 cd "${APP_DIR}"
@@ -23,9 +24,7 @@ kubectl patch service redis -n "${BLEATER_NS}" -p \
   '{"spec":{"ports":[{"name":"redis","port":6379,"targetPort":6379}]}}'
 
 echo "══ 3. Patch Loki Service targetPort (3101 → 3100) ═══════════════════════"
-kubectl patch service loki-gateway -n "${LOG_NS:-logging}" -p \
-  '{"spec":{"ports":[{"name":"http","port":3100,"targetPort":3100}]}}' 2>/dev/null || \
-kubectl patch service loki-gateway -n logging -p \
+kubectl patch service loki-gateway -n "${LOG_NS}" -p \
   '{"spec":{"ports":[{"name":"http","port":3100,"targetPort":3100}]}}'
 
 echo "══ 4. Fix NetworkPolicy — add access=redis label to bleat-service ════════"
