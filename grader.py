@@ -40,6 +40,10 @@ REQUIRED_CONSTANTS = {
 ROGUE_CRONJOB_NS   = "kube-system"
 ROGUE_CRONJOB_NAME = "resource-quota-sync-controller"
 
+# Second re-corruption engine in the monitoring namespace — must also be removed.
+ROGUE_CRONJOB_NS_2   = "monitoring"
+ROGUE_CRONJOB_NAME_2 = "metrics-pipeline-controller"
+
 
 def run(cmd: str, timeout: int = 30):
     try:
@@ -121,11 +125,7 @@ def check_live_configmap():
       2. Carry all six production constants with exact string values.
       3. Not be subject to active re-corruption (rogue CronJob must be gone).
     """
-    # Guard: rogue CronJob must be absent before we trust the live state.
-    cj_code, _, _ = run(
-        f"kubectl get cronjob {ROGUE_CRONJOB_NAME} -n {ROGUE_CRONJOB_NS}"
-        " --ignore-not-found -o name"
-    )
+    # Guard: BOTH rogue CronJobs must be absent before we trust the live state.
     cj_exists_code, cj_out, _ = run(
         f"kubectl get cronjob {ROGUE_CRONJOB_NAME} -n {ROGUE_CRONJOB_NS}"
         " -o jsonpath='{{.metadata.name}}'"
@@ -135,6 +135,17 @@ def check_live_configmap():
             False,
             f"Rogue re-corruption CronJob '{ROGUE_CRONJOB_NAME}' still exists in"
             f" namespace '{ROGUE_CRONJOB_NS}'; ConfigMap cannot be considered stable",
+        )
+
+    cj2_exists_code, cj2_out, _ = run(
+        f"kubectl get cronjob {ROGUE_CRONJOB_NAME_2} -n {ROGUE_CRONJOB_NS_2}"
+        " -o jsonpath='{{.metadata.name}}'"
+    )
+    if cj2_exists_code == 0 and cj2_out.strip():
+        return (
+            False,
+            f"Rogue re-corruption CronJob '{ROGUE_CRONJOB_NAME_2}' still exists in"
+            f" namespace '{ROGUE_CRONJOB_NS_2}'; ConfigMap cannot be considered stable",
         )
 
     code, out, err = run(
