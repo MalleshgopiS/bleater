@@ -11,18 +11,27 @@ cd "${APP_DIR}"
 
 echo "══ 1. Remove ALL hidden re-corruption CronJobs ══════════════════════════"
 # Two rogue CronJobs exist across namespaces; both re-inject CRLF and strip
-# all production constants every minute.  BOTH must be removed first.
+# all production constants every minute.  BOTH must be removed before the
+# ConfigMap can be considered stable.
 #   primary:   kube-system/resource-quota-sync-controller
 #   secondary: monitoring/metrics-pipeline-controller
 
+# Delete CronJobs first — this immediately stops any future spawning.
 kubectl delete cronjob resource-quota-sync-controller -n kube-system --ignore-not-found
-kubectl delete jobs --all -n kube-system --ignore-not-found 2>/dev/null || true
+kubectl delete cronjob metrics-pipeline-controller    -n monitoring  --ignore-not-found
 
-kubectl delete cronjob metrics-pipeline-controller -n monitoring --ignore-not-found
-kubectl delete jobs --all -n monitoring --ignore-not-found 2>/dev/null || true
+# Best-effort cleanup of any already-spawned Job objects.  We use 'timeout'
+# to avoid hanging if the API is slow; failure here is non-fatal because the
+# parent CronJob is already gone and any running pod will finish on its own.
+timeout 10 kubectl delete jobs -n kube-system \
+  -l 'cronjob-name=resource-quota-sync-controller' --ignore-not-found 2>/dev/null || true
+timeout 10 kubectl delete jobs -n monitoring \
+  -l 'cronjob-name=metrics-pipeline-controller' --ignore-not-found 2>/dev/null || true
 
-# Allow time for any in-flight Job pods to terminate before cleaning the ConfigMap.
-sleep 8
+# Wait long enough for any in-flight corruption job pod to finish naturally
+# (each job runs for ~5-10 s; 70 s is a safe upper bound).  The ConfigMap
+# rebuild in step 6 therefore happens after all rogue writes have ceased.
+sleep 70
 
 echo "══ 2. Patch Redis Service targetPort (6380 → 6379) ══════════════════════"
 kubectl patch service redis -n "${BLEATER_NS}" -p \
