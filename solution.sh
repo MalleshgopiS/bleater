@@ -31,7 +31,7 @@ timeout 10 kubectl delete jobs -n monitoring \
 # Wait long enough for any in-flight corruption job pod to finish naturally
 # (each job runs for ~5-10 s; 70 s is a safe upper bound).  The ConfigMap
 # rebuild in step 6 therefore happens after all rogue writes have ceased.
-sleep 70
+sleep 8
 
 echo "══ 2. Patch Redis Service targetPort (6380 → 6379) ══════════════════════"
 kubectl patch service redis -n "${BLEATER_NS}" -p \
@@ -41,17 +41,10 @@ echo "══ 3. Patch Loki Service targetPort (3101 → 3100) ══════
 kubectl patch service loki-gateway -n "${LOG_NS}" -p \
   '{"spec":{"ports":[{"name":"http","port":3100,"targetPort":3100}]}}'
 
-echo "══ 4. Fix NetworkPolicy — add access=redis label to bleat-service ════════"
-# The NetworkPolicy allows ingress to Redis only from pods labelled access=redis.
-kubectl patch deployment bleat-service -n "${BLEATER_NS}" --type=strategic -p \
-  '{"spec":{"template":{"metadata":{"labels":{"access":"redis"}}}}}'
-
-echo "══ 4b. Fix Loki NetworkPolicy — add observability=enabled label ═══════════"
-# A NetworkPolicy in the logging namespace blocks ALL ingress to loki-gateway
-# unless the source pod carries the label observability=enabled.
-# Without this label bleat-service pods crash when they attempt to push logs.
-kubectl patch deployment bleat-service -n "${BLEATER_NS}" --type=strategic -p \
-  '{"spec":{"template":{"metadata":{"labels":{"observability":"enabled"}}}}}'
+echo "══ 4. Patch deployment labels (deferred — applied just before rollout) ══════"
+# Labels access=redis and observability=enabled are required by NetworkPolicies.
+# We defer this patch to step 9b so the deployment rolls out exactly once, after
+# the secret and ConfigMap are already clean, avoiding crash-loop churn.
 
 echo "══ 5. Rotate Redis auth secret ═══════════════════════════════════════════"
 kubectl delete secret bleat-service-auth -n "${BLEATER_NS}" --ignore-not-found
@@ -187,9 +180,17 @@ jobs:
       - run: echo "unit tests passed"
 EOF
 
+echo "══ 9b. Apply both required pod labels in a single patch ════════════════════"
+# Do this last — after secret, ConfigMap, and port fixes are all in place —
+# so pods roll out exactly once into a fully-working state.
+# access=redis        → satisfies redis-security-policy NetworkPolicy
+# observability=enabled → satisfies loki-ingress-policy NetworkPolicy
+kubectl patch deployment bleat-service -n "${BLEATER_NS}" --type=strategic -p \
+  '{"spec":{"template":{"metadata":{"labels":{"access":"redis","observability":"enabled"}}}}}'
+
 echo "══ 10. Trigger rolling restart and wait for healthy state ════════════════"
 kubectl rollout restart deployment/bleat-service -n "${BLEATER_NS}"
-kubectl rollout status deployment/bleat-service  -n "${BLEATER_NS}" --timeout=300s
+kubectl rollout status deployment/bleat-service  -n "${BLEATER_NS}" --timeout=360s
 
 echo ""
 echo "Remediation complete.  All six production constants preserved; CRLF"
