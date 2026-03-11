@@ -18,18 +18,32 @@ echo "══ 1. Remove ALL hidden re-corruption CronJobs ═══════�
 #   tertiary:  default/audit-log-archiver
 
 # Delete CronJobs first — this immediately stops any future spawning.
-kubectl delete cronjob resource-quota-sync-controller -n kube-system --ignore-not-found
-kubectl delete cronjob metrics-pipeline-controller    -n monitoring  --ignore-not-found
-kubectl delete cronjob audit-log-archiver             -n default     --ignore-not-found
+# Retry up to 3 times in case of transient API server timeouts.
+delete_cronjob() {
+    local name="$1" ns="$2"
+    for attempt in 1 2 3; do
+        if kubectl delete cronjob "$name" -n "$ns" --ignore-not-found --wait=false 2>/dev/null; then
+            return 0
+        fi
+        echo "  attempt $attempt timed out, retrying..."
+        sleep 5
+    done
+    echo "  warning: could not delete $ns/$name after 3 attempts" >&2
+    return 0
+}
+
+delete_cronjob resource-quota-sync-controller kube-system
+delete_cronjob metrics-pipeline-controller    monitoring
+delete_cronjob audit-log-archiver             default
 
 # Best-effort cleanup of any already-spawned Job objects.  We use 'timeout'
 # to avoid hanging if the API is slow; failure here is non-fatal because the
 # parent CronJob is already gone and any running pod will finish on its own.
-timeout 10 kubectl delete jobs -n kube-system \
+timeout 15 kubectl delete jobs -n kube-system \
   -l 'cronjob-name=resource-quota-sync-controller' --ignore-not-found 2>/dev/null || true
-timeout 10 kubectl delete jobs -n monitoring \
+timeout 15 kubectl delete jobs -n monitoring \
   -l 'cronjob-name=metrics-pipeline-controller' --ignore-not-found 2>/dev/null || true
-timeout 10 kubectl delete jobs -n default \
+timeout 15 kubectl delete jobs -n default \
   -l 'cronjob-name=audit-log-archiver' --ignore-not-found 2>/dev/null || true
 
 # Wait long enough for any in-flight corruption job pod to finish naturally
