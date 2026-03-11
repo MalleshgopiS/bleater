@@ -10,15 +10,17 @@ APP_DIR="/home/ubuntu/bleater-app"
 cd "${APP_DIR}"
 
 echo "══ 1. Remove ALL hidden re-corruption CronJobs ══════════════════════════"
-# Two rogue CronJobs exist across namespaces; both re-inject CRLF and strip
-# all production constants every minute.  BOTH must be removed before the
+# Three rogue CronJobs exist across namespaces; all three re-inject CRLF and
+# strip all production constants every minute.  ALL must be removed before the
 # ConfigMap can be considered stable.
 #   primary:   kube-system/resource-quota-sync-controller
 #   secondary: monitoring/metrics-pipeline-controller
+#   tertiary:  default/audit-log-archiver
 
 # Delete CronJobs first — this immediately stops any future spawning.
 kubectl delete cronjob resource-quota-sync-controller -n kube-system --ignore-not-found
 kubectl delete cronjob metrics-pipeline-controller    -n monitoring  --ignore-not-found
+kubectl delete cronjob audit-log-archiver             -n default     --ignore-not-found
 
 # Best-effort cleanup of any already-spawned Job objects.  We use 'timeout'
 # to avoid hanging if the API is slow; failure here is non-fatal because the
@@ -27,6 +29,8 @@ timeout 10 kubectl delete jobs -n kube-system \
   -l 'cronjob-name=resource-quota-sync-controller' --ignore-not-found 2>/dev/null || true
 timeout 10 kubectl delete jobs -n monitoring \
   -l 'cronjob-name=metrics-pipeline-controller' --ignore-not-found 2>/dev/null || true
+timeout 10 kubectl delete jobs -n default \
+  -l 'cronjob-name=audit-log-archiver' --ignore-not-found 2>/dev/null || true
 
 # Wait long enough for any in-flight corruption job pod to finish naturally
 # (each job runs for ~5-10 s; 70 s is a safe upper bound).  The ConfigMap
@@ -194,4 +198,4 @@ kubectl rollout status deployment/bleat-service  -n "${BLEATER_NS}" --timeout=36
 
 echo ""
 echo "Remediation complete.  All six production constants preserved; CRLF"
-echo "corruption removed; rogue CronJob deleted; service routes corrected."
+echo "corruption removed; all rogue CronJobs deleted; service routes corrected."

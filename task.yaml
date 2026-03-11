@@ -1,5 +1,5 @@
 id: bleat-service-configmap-redis-crlf-corruption
-title: "ConfigMap Data Encoding Corruption — bleat-service Redis Config Contains Binary-Safe Keys Breaking Connection"
+title: "bleat-service Sev-1 — full production outage"
 category: platform-eng
 difficulty: expert
 horizon: long
@@ -7,64 +7,26 @@ horizon: long
 tags:
   - kubernetes
   - debugging
-  - redis
   - incident-response
   - platform-engineering
-  - encoding
 
 prompt: |
   [Context]
   You are responding to a Sev-1 production incident. Bleater's core application
-  (`bleat-service` in the `bleater` namespace) has entered a broken state
-  following last night's configuration push. Service-level error rates are at
-  100 % and the datastore layer is completely unreachable.
+  (`bleat-service` in the `bleater` namespace) has entered a broken state.
+  Service-level error rates are at 100% and the service is completely
+  unreachable.
 
   Engineers have left preliminary triage notes in the local incident tracker at
   `/home/ubuntu/bleater-app/issues/`.
 
   [TASK]
-  Investigate the entire environment — cluster networking, service routing,
-  secrets, ConfigMaps, and any background workloads — and fix every cascading
-  defect that is preventing `bleat-service` from reaching a stable, connected
-  state.
+  Investigate the entire environment and restore `bleat-service` to a fully
+  operational state. The scope of the investigation is intentionally open-ended
+  — examine whatever you believe is relevant.
 
-  Known defect areas (non-exhaustive):
-
-  - **Configuration encoding**: The ConfigMap used by `bleat-service` contains
-    silent character-encoding drift. Strip all corruption without altering the
-    canonical URI structure or any other production values already present.
-  - **Service routing**: Internal Kubernetes Service objects may have incorrect
-    port mappings left by previous deployments. Verify every relevant Service's
-    `targetPort` matches the actual container port.
-  - **Access control**: Network-layer policies may block traffic between
-    application pods and their dependencies. Ensure pods carry whatever labels
-    are required by active NetworkPolicies.
-  - **Credential management**: Secrets may not reflect the latest rotated
-    credentials. Consult all available documentation and update accordingly.
-  - **Background interference**: Long-running cluster workloads from previous
-    engineering efforts may be actively re-introducing failures. All namespaces
-    should be considered in scope.
-  - **CI/CD prevention**: The engineering team requires a Python validation
-    script (`scripts/validate_configmap.py`) and a corresponding Gitea CI
-    workflow step that together prevent future encoding corruption from reaching
-    production.
-
-  Evaluation policy is strict.  The incident is considered **fully resolved**
-  only when ALL of the following hold simultaneously:
-
-  - The live `bleat-service-config` ConfigMap carries a clean, uncorrupted
-    `REDIS_URL` and all production constants are present with correct values.
-  - The local repository manifest (`k8s/bleat-service-configmap.yaml`) matches
-    the live state: clean URL and all production constants.
-  - The `bleat-service` Deployment achieves a stable 2/2 Ready state.
-  - The active Pod environment reflects the corrected configuration.
-  - Loki contains a successful Redis connection log from `bleat-service`.
-  - No new error logs appear in Loki after the recovery event.
-  - The Python validation script correctly accepts clean manifests and rejects
-    all forms of encoding corruption (real control characters, escaped literal
-    sequences such as `\r`, and null bytes).
-  - The Gitea CI workflow runs the validation script against the ConfigMap
-    manifest on every push.
+  The incident is considered resolved when `bleat-service` is healthy,
+  connected to its dependencies, and operating without errors end-to-end.
 
   Constraints:
   - Do **not** recreate the `bleat-service` Deployment (the original Kubernetes
@@ -87,10 +49,5 @@ metadata:
   estimated_time: 5H
   tags:
     - kubernetes
-    - encoding
-    - redis
     - incident-response
     - platform-engineering
-    - cronjob
-    - networkpolicy
-    - secrets

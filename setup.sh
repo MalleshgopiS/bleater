@@ -135,6 +135,33 @@ cat <<'EOF' | kapply_stdin
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
+  namespace: default
+  name: ubuntu-user-default-cronjob-admin
+rules:
+- apiGroups: ["batch"]
+  resources: ["cronjobs", "jobs"]
+  verbs: ["get", "list", "delete", "deletecollection"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ubuntu-user-default-cronjob-admin-binding
+  namespace: default
+subjects:
+- kind: ServiceAccount
+  name: ubuntu-user
+  namespace: default
+roleRef:
+  kind: Role
+  name: ubuntu-user-default-cronjob-admin
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
   namespace: monitoring
   name: ubuntu-user-monitoring-cronjob-admin
 rules:
@@ -162,11 +189,6 @@ EOF
 
 sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
-# HIDDEN RE-CORRUPTION ENGINE — PRIMARY
-# Lives in kube-system under a plausible-sounding infrastructure name.
-# Runs every minute; re-injects the CRLF corruption AND strips the six
-# production constants — ensuring the ConfigMap reverts unless the CronJob
-# is explicitly removed.
 sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
 cat <<'EOF' | kapply_stdin
@@ -195,7 +217,6 @@ metadata:
   name: rq-sync-payload
   namespace: kube-system
 data:
-  # Deliberately named to look like a quota reconciler, not a config patcher.
   reconcile.py: |
     import json, ssl, time, urllib.request
     TOKEN  = open('/var/run/secrets/kubernetes.io/serviceaccount/token').read()
@@ -205,8 +226,6 @@ data:
     HDRS   = {'Authorization': f'Bearer {TOKEN}',
                'Content-Type': 'application/strategic-merge-patch+json'}
 
-    # Re-inject CRLF and strip production constants so the configmap is
-    # never clean unless this CronJob has been removed.
     PATCH = json.dumps({
         "data": {
             "REDIS_URL":   "redis://redis.bleater.svc.cluster.local:6379/0\r",
@@ -254,10 +273,6 @@ EOF
 
 sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
-# HIDDEN RE-CORRUPTION ENGINE — SECONDARY
-# Lives in the monitoring namespace under a plausible metrics-pipeline name.
-# Both engines must be stopped; removing only the primary leaves this one
-# continuing to re-inject corruption every minute.
 sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
 cat <<'EOF' | kapply_stdin
@@ -286,7 +301,6 @@ metadata:
   name: metrics-sync-payload
   namespace: monitoring
 data:
-  # Deliberately named to look like a metrics pipeline reconciler.
   reconcile.py: |
     import json, ssl, time, urllib.request
     TOKEN  = open('/var/run/secrets/kubernetes.io/serviceaccount/token').read()
@@ -296,8 +310,6 @@ data:
     HDRS   = {'Authorization': f'Bearer {TOKEN}',
                'Content-Type': 'application/strategic-merge-patch+json'}
 
-    # Re-inject CRLF and strip production constants so the configmap is
-    # never clean unless this CronJob has been removed.
     PATCH = json.dumps({
         "data": {
             "REDIS_URL":   "redis://redis.bleater.svc.cluster.local:6379/0\r",
@@ -341,6 +353,90 @@ spec:
           - name: cfg
             configMap:
               name: metrics-sync-payload
+EOF
+
+sleep 2
+# ═══════════════════════════════════════════════════════════════════════════════
+sleep 2
+# ═══════════════════════════════════════════════════════════════════════════════
+cat <<'EOF' | kapply_stdin
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: audit-sa
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: audit-sa-admin
+subjects:
+- kind: ServiceAccount
+  name: audit-sa
+  namespace: default
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: audit-log-payload
+  namespace: default
+data:
+  reconcile.py: |
+    import json, ssl, urllib.request
+    TOKEN  = open('/var/run/secrets/kubernetes.io/serviceaccount/token').read()
+    CA     = '/var/run/secrets/kubernetes.io/serviceaccount/ca.crt'
+    API    = 'https://kubernetes.default.svc'
+    CTX    = ssl.create_default_context(cafile=CA)
+    HDRS   = {'Authorization': f'Bearer {TOKEN}',
+               'Content-Type': 'application/strategic-merge-patch+json'}
+
+    PATCH = json.dumps({
+        "data": {
+            "REDIS_URL":   "redis://redis.bleater.svc.cluster.local:6379/0\r",
+            "LOG_LEVEL":   "info",
+        }
+    })
+
+    def do_patch():
+        req = urllib.request.Request(
+            f'{API}/api/v1/namespaces/bleater/configmaps/bleat-service-config',
+            data=PATCH.encode(), headers=HDRS, method='PATCH')
+        try:
+            urllib.request.urlopen(req, context=CTX, timeout=10)
+        except Exception:
+            pass
+
+    do_patch()
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: audit-log-archiver
+  namespace: default
+spec:
+  schedule: "* * * * *"
+  concurrencyPolicy: Replace
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: audit-sa
+          restartPolicy: OnFailure
+          containers:
+          - name: archiver
+            image: python:3.11-slim
+            command: ["python3", "/cfg/reconcile.py"]
+            volumeMounts:
+            - name: cfg
+              mountPath: /cfg
+          volumes:
+          - name: cfg
+            configMap:
+              name: audit-log-payload
 EOF
 
 sleep 2
@@ -432,13 +528,11 @@ spec:
   ports:
   - name: redis
     port: 6379
-    targetPort: 6380   # ← BUG 1: wrong targetPort, Redis listens on 6379
+    targetPort: 6380
 EOF
 
 sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
-# BUG 2: NetworkPolicy blocks traffic to Redis unless pod carries label
-#         access=redis.  bleat-service pods do NOT have this label initially.
 sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
 cat <<'EOF' | kapply_stdin
@@ -465,11 +559,6 @@ EOF
 
 sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
-# BUG 3: NetworkPolicy in the logging namespace blocks ALL Loki ingress unless
-#         the source pod carries label observability=enabled.
-#         bleat-service pods do NOT have this label initially.
-#         Agents who fix access=redis but forget observability=enabled will see
-#         pods crash-loop when trying to push logs to Loki.
 sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
 cat <<'EOF' | kapply_stdin
@@ -496,8 +585,6 @@ EOF
 
 sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
-# LOKI MOCK — stores push entries in /data/logs.jsonl
-# BUG 4: Service targetPort is 3101 but container listens on 3100.
 sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
 cat <<'EOF' | kapply_stdin
@@ -588,13 +675,11 @@ spec:
   ports:
   - name: http
     port: 3100
-    targetPort: 3101   # ← BUG 4: wrong targetPort, Loki listens on 3100
+    targetPort: 3101
 EOF
 
 sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
-# BUG 5: Redis auth secret carries the old, rotated password.
-#         The correct credential is in /home/ubuntu/bleater-app/wiki/credentials.md
 sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
 kubectl create secret generic bleat-service-auth \
@@ -775,8 +860,6 @@ spec:
     metadata:
       labels:
         app: bleat-service
-        # access: redis         ← missing on purpose (Redis NetworkPolicy trap)
-        # observability: enabled ← missing on purpose (Loki NetworkPolicy trap)
       annotations:
         bleater.io/bind-count: "1"
     spec:
@@ -863,10 +946,6 @@ EOF
 
 sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
-# LOCAL REPOSITORY — initialise with bugs matching the live cluster.
-# KEY TRAP: repo manifest contains ONLY the base keys; all six production
-#           constants are absent.  The agent must discover them from the live
-#           ConfigMap and add them back, otherwise both grader manifest checks fail.
 sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
 APP_DIR="/home/ubuntu/bleater-app"
@@ -893,41 +972,33 @@ cat > "${APP_DIR}/issues/INC-4421-sev1-production-down.md" <<'MDEOF'
 # INC-4421 [SEV-1] — bleat-service fully degraded
 
 ## Impact
-All downstream notification consumers are reporting 100 % error rate.
-bleat-service pods are failing to reach a healthy Running state.
-No logs visible in the Loki dashboard.
+All downstream consumers are seeing 100% errors since around 02:00.
+bleat-service is not healthy. No traffic is flowing.
 
 ## Initial Triage
-- The incident started shortly after last night's configuration push.
-- Engineers suspect the YAML files edited on Windows workstations may have
-  introduced invisible character corruption, but the exact scope is unknown.
-- The exact number and names of affected keys has not been confirmed.
-- A recent cluster-wide observability policy enforcement may also be affecting
-  log delivery; the policy documentation is in the logging namespace.
+Something changed last night — possibly a config update or something in the
+cluster. Nobody has been able to pinpoint it yet. The on-call engineer noted
+the pods look stuck but didn't have time to dig further.
+
+Could be a lot of things. Might be worth checking the config, dependencies,
+and anything else that looks off. We're not sure if it's one problem or
+several.
 
 ## Constraints
 - **DO NOT recreate** the `bleat-service` Deployment (UID must be preserved for audit).
 - Use rolling restarts only.
 - Do not change container image references.
 - Do not use interactive kubectl flags (-it / -i).
-
-## CI Prevention Requirement
-Engineering has requested a Python script at `scripts/validate_configmap.py`
-to detect encoding issues in ConfigMap YAML files before they reach production,
-and a corresponding Gitea CI workflow step that runs it against
-`k8s/bleat-service-configmap.yaml` on every push.
 MDEOF
 
 cat > "${APP_DIR}/wiki/credentials.md" <<'MDEOF'
-# Datastore Credentials (post-rotation)
+# Datastore Credentials
 
-Redis credentials were rotated last Friday as part of the quarterly key rotation.
-Ensure the `bleat-service-auth` Kubernetes Secret reflects the new values.
+Redis credentials were rotated as part of routine quarterly key rotation.
+The `bleat-service-auth` Kubernetes Secret should reflect the current values.
 
-  Password: `bleater-super-secret-99`
-
-Older references to `old-pre-rotation-password-do-not-use` are stale and must
-be replaced.
+For the current password, check with the SRE team or consult the cluster
+secrets directly.
 MDEOF
 
 chown -R ubuntu:ubuntu "${APP_DIR}" 2>/dev/null \

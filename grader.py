@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Grader for: ConfigMap Data Encoding Corruption — bleat-service Redis Config
+Grader for: bleat-service Sev-1 incident response
 Scoring: 10 checks × 0.10 weight each = 1.0 max score
 """
 
@@ -23,10 +23,6 @@ UID_FILE = Path("/tmp/bleat-service-deployment-uid")
 PODS_FILE = Path("/tmp/bleat-service-original-pods")
 
 # ────────────────────────────────────────────────────────────────────────────
-# Six undocumented production constants that MUST survive every remediation.
-# Three were present before the incident; three were added in the same push.
-# All six must appear verbatim in both the live ConfigMap and the repo manifest.
-# ────────────────────────────────────────────────────────────────────────────
 REQUIRED_CONSTANTS = {
     "_ROUTING_RETRY_DELAY_MS":  "0",
     "_MIN_TTL_FLOOR_MS":        "3600",
@@ -36,13 +32,14 @@ REQUIRED_CONSTANTS = {
     "_FANOUT_CAP_ENABLED":      "false",
 }
 
-# CronJob that keeps re-injecting the corruption — must be fully removed.
 ROGUE_CRONJOB_NS   = "kube-system"
 ROGUE_CRONJOB_NAME = "resource-quota-sync-controller"
 
-# Second re-corruption engine in the monitoring namespace — must also be removed.
 ROGUE_CRONJOB_NS_2   = "monitoring"
 ROGUE_CRONJOB_NAME_2 = "metrics-pipeline-controller"
+
+ROGUE_CRONJOB_NS_3   = "default"
+ROGUE_CRONJOB_NAME_3 = "audit-log-archiver"
 
 
 def run(cmd: str, timeout: int = 30):
@@ -146,6 +143,17 @@ def check_live_configmap():
             False,
             f"Rogue re-corruption CronJob '{ROGUE_CRONJOB_NAME_2}' still exists in"
             f" namespace '{ROGUE_CRONJOB_NS_2}'; ConfigMap cannot be considered stable",
+        )
+
+    cj3_exists_code, cj3_out, _ = run(
+        f"kubectl get cronjob {ROGUE_CRONJOB_NAME_3} -n {ROGUE_CRONJOB_NS_3}"
+        " -o jsonpath='{{.metadata.name}}'"
+    )
+    if cj3_exists_code == 0 and cj3_out.strip():
+        return (
+            False,
+            f"Rogue re-corruption CronJob '{ROGUE_CRONJOB_NAME_3}' still exists in"
+            f" namespace '{ROGUE_CRONJOB_NS_3}'; ConfigMap cannot be considered stable",
         )
 
     code, out, err = run(
