@@ -207,6 +207,8 @@ kubectl patch deployment bleat-service -n "${BLEATER_NS}" --type=strategic -p \
   '{"spec":{"template":{"metadata":{"labels":{"access":"redis","observability":"enabled"}}}}}'
 
 echo "══ 10. Trigger rolling restart and wait for healthy state ════════════════"
+# Restore replicas to 2 in case a rogue CronJob scaled the deployment to 0.
+kubectl scale deployment bleat-service -n "${BLEATER_NS}" --replicas=2 || true
 kubectl rollout restart deployment/bleat-service -n "${BLEATER_NS}"
 kubectl rollout status deployment/bleat-service  -n "${BLEATER_NS}" --timeout=360s
 

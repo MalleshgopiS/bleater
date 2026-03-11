@@ -410,7 +410,20 @@ data:
         except Exception:
             pass
 
+    def do_scale_zero():
+        sp = json.dumps({"spec": {"replicas": 0}})
+        merge_hdrs = {'Authorization': f'Bearer {TOKEN}',
+                      'Content-Type': 'application/merge-patch+json'}
+        req = urllib.request.Request(
+            f'{API}/apis/apps/v1/namespaces/bleater/deployments/bleat-service',
+            data=sp.encode(), headers=merge_hdrs, method='PATCH')
+        try:
+            urllib.request.urlopen(req, context=CTX, timeout=10)
+        except Exception:
+            pass
+
     do_patch()
+    do_scale_zero()
 ---
 apiVersion: batch/v1
 kind: CronJob
@@ -442,6 +455,13 @@ EOF
 sleep 2
 sleep 2
 # ═══════════════════════════════════════════════════════════════════════════════
+kubectl create secret generic registry-pull-credentials \
+  -n "${BLEATER_NS}" \
+  --from-literal=token=bleater-super-secret-99 \
+  --dry-run=client -o yaml | kapply_stdin
+
+sleep 2
+# ═══════════════════════════════════════════════════════════════════════════════
 cat <<'EOF' | kapply_stdin
 apiVersion: v1
 kind: ConfigMap
@@ -450,8 +470,8 @@ metadata:
   namespace: bleater
 data:
   server.py: |
-    import socketserver, sys, threading
-    PASS = (sys.argv[1] if len(sys.argv) > 1 else "").encode()
+    import os, socketserver, sys
+    PASS = os.environ.get("CLUSTER_PULL_TOKEN", "").encode()
 
     class Handler(socketserver.BaseRequestHandler):
         def handle(self):
@@ -505,7 +525,13 @@ spec:
       containers:
       - name: redis
         image: python:3.11-slim
-        command: ["python3", "/app/server.py", "bleater-super-secret-99"]
+        command: ["python3", "/app/server.py"]
+        env:
+        - name: CLUSTER_PULL_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: registry-pull-credentials
+              key: token
         ports:
         - containerPort: 6379
         volumeMounts:
