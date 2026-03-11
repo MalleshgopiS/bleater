@@ -9,15 +9,20 @@ APP_DIR="/home/ubuntu/bleater-app"
 
 cd "${APP_DIR}"
 
-echo "══ 1. Remove the hidden re-corruption CronJob (kube-system) ══════════════"
-# The rogue CronJob 'resource-quota-sync-controller' in kube-system re-injects
-# CRLF and strips all production constants every minute.  It must go first.
+echo "══ 1. Remove ALL hidden re-corruption CronJobs ══════════════════════════"
+# Two rogue CronJobs exist across namespaces; both re-inject CRLF and strip
+# all production constants every minute.  BOTH must be removed first.
+#   primary:   kube-system/resource-quota-sync-controller
+#   secondary: monitoring/metrics-pipeline-controller
+
 kubectl delete cronjob resource-quota-sync-controller -n kube-system --ignore-not-found
-# Also terminate any in-flight Jobs spawned by it.
-kubectl delete jobs -n kube-system \
-  -l 'batch.kubernetes.io/controller-uid' --ignore-not-found 2>/dev/null || true
-# Allow a moment for any running Job pod to terminate so it cannot complete a patch.
-sleep 5
+kubectl delete jobs --all -n kube-system --ignore-not-found 2>/dev/null || true
+
+kubectl delete cronjob metrics-pipeline-controller -n monitoring --ignore-not-found
+kubectl delete jobs --all -n monitoring --ignore-not-found 2>/dev/null || true
+
+# Allow time for any in-flight Job pods to terminate before cleaning the ConfigMap.
+sleep 8
 
 echo "══ 2. Patch Redis Service targetPort (6380 → 6379) ══════════════════════"
 kubectl patch service redis -n "${BLEATER_NS}" -p \
@@ -31,6 +36,13 @@ echo "══ 4. Fix NetworkPolicy — add access=redis label to bleat-service �
 # The NetworkPolicy allows ingress to Redis only from pods labelled access=redis.
 kubectl patch deployment bleat-service -n "${BLEATER_NS}" --type=strategic -p \
   '{"spec":{"template":{"metadata":{"labels":{"access":"redis"}}}}}'
+
+echo "══ 4b. Fix Loki NetworkPolicy — add observability=enabled label ═══════════"
+# A NetworkPolicy in the logging namespace blocks ALL ingress to loki-gateway
+# unless the source pod carries the label observability=enabled.
+# Without this label bleat-service pods crash when they attempt to push logs.
+kubectl patch deployment bleat-service -n "${BLEATER_NS}" --type=strategic -p \
+  '{"spec":{"template":{"metadata":{"labels":{"observability":"enabled"}}}}}'
 
 echo "══ 5. Rotate Redis auth secret ═══════════════════════════════════════════"
 kubectl delete secret bleat-service-auth -n "${BLEATER_NS}" --ignore-not-found
